@@ -1,9 +1,7 @@
 name: Build Armbian Stable (boca-tcn200)
 
 on:
-  workflow_dispatch:  # 手动触发编译（推荐）
-  # schedule:
-  #   - cron: '0 0 * * 0'  # 可选：每周日凌晨触发，注释掉则仅手动触发
+  workflow_dispatch:  # 手动触发编译
 
 jobs:
   # Job 1: 编译 legacy 分支（5.10内核）
@@ -15,7 +13,7 @@ jobs:
       - name: Checkout Armbian Build Code
         uses: actions/checkout@v4
         with:
-          repository: stevenliuit/armbian-build  # 核心修改：指向目标仓库
+          repository: stevenliuit/armbian-build
           path: armbian-build
           fetch-depth: 1
 
@@ -23,28 +21,27 @@ jobs:
         run: |
           sudo apt update && sudo apt install -y git curl wget build-essential libncurses5-dev libssl-dev unzip zip
           cd armbian-build
-          ./scripts/prepare-host.sh  # 安装 Armbian 编译依赖
+          ./scripts/prepare-host.sh
 
       - name: Build Armbian (boca-tcn200 legacy/5.10)
         run: |
           cd armbian-build
-          # 核心编译参数：指定板型、内核分支、系统类型（可根据需求调整）
           ./compile.sh \
             BOARD=boca-tcn200 \
-            BRANCH=legacy \  # 指定 legacy 分支（5.10内核）
-            RELEASE=bookworm \  # 系统版本，可选 bullseye/bookworm
-            BUILD_MINIMAL=no \  # 不编译最小系统
-            BUILD_DESKTOP=yes \  # 编译桌面版（匹配板型配置的 FULL_DESKTOP="yes"）
+            BRANCH=legacy \
+            RELEASE=bookworm \
+            BUILD_MINIMAL=no \
+            BUILD_DESKTOP=yes \
             KERNEL_ONLY=no \
             KERNEL_CONFIGURE=no \
             CLEAN_LEVEL=make clean \
-            USERPATCHES_PATH=userpatches  # 加载板型专属补丁
+            USERPATCHES_PATH=userpatches
 
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
         with:
           name: armbian-boca-tcn200-legacy-5.10
-          path: armbian-build/output/images/*.img*  # 上传编译好的镜像文件
+          path: armbian-build/output/images/*.img*
 
   # Job 2: 编译 vendor 分支（6.1内核）
   build-vendor:
@@ -55,7 +52,7 @@ jobs:
       - name: Checkout Armbian Build Code
         uses: actions/checkout@v4
         with:
-          repository: stevenliuit/armbian-build  # 核心修改：指向目标仓库
+          repository: stevenliuit/armbian-build
           path: armbian-build
           fetch-depth: 1
 
@@ -68,10 +65,9 @@ jobs:
       - name: Build Armbian (boca-tcn200 vendor/6.1)
         run: |
           cd armbian-build
-          # 核心编译参数：仅修改 BRANCH 为 vendor
           ./compile.sh \
             BOARD=boca-tcn200 \
-            BRANCH=vendor \  # 指定 vendor 分支（6.1内核）
+            BRANCH=vendor \
             RELEASE=bookworm \
             BUILD_MINIMAL=no \
             BUILD_DESKTOP=yes \
@@ -85,3 +81,58 @@ jobs:
         with:
           name: armbian-boca-tcn200-vendor-6.1
           path: armbian-build/output/images/*.img*
+
+  # Job 3: 生成 Release 并上传所有产物（修复 Release Body 逻辑）
+  create-release:
+    needs: [build-legacy, build-vendor]  # 依赖前两个编译Job完成
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Generate Release Body (修复版)
+        run: |
+          # 直接硬编码固定信息，无需查找matrix-info文件
+          BUILT_BOARDS="boca-tcn200"
+          BUILT_BRANCHES="legacy (5.10), vendor (6.1)"
+          BUILT_RELEASES="bookworm"
+          BUILT_DESKTOPS="yes"
+          
+          # 生成body.html，内容与原逻辑一致但信息固定
+          echo "
+            <p align='center'>
+            <a href='https://www.armbian.com'>
+            <img src='https://raw.githubusercontent.com/armbian/.github/master/profile/tux-two.png' width='400'></a></p>
+            <h1 align=center>Armbian OS</h1>
+            <p align=center>
+            <a href='https://www.armbian.com'><img alt='Armbian Linux stable' src='https://img.shields.io/badge/dynamic/json?label=Armbian%20Linux%20current&query=CURRENT&color=f71000&cacheSeconds=600&style=for-the-badge&url=https%3A%2F%2Fgithub.com%2Farmbian%2Fscripts%2Freleases%2Fdownload%2Fstatus%2Frunners_capacity.json'></a>
+            <a href='https://www.armbian.com'><img alt='Armbian Linux rolling' src='https://img.shields.io/badge/dynamic/json?label=Armbian%20Linux%20edge&query=EDGE&color=34be5b&cacheSeconds=600&style=for-the-badge&url=https%3A%2F%2Fgithub.com%2Farmbian%2Fscripts%2Freleases%2Fdownload%2Fstatus%2Frunners_capacity.json'></a>
+            </p>
+            <br>
+            
+            - **Board**: ${BUILT_BOARDS}
+            - **Kernel**: ${BUILT_BRANCHES}
+            - **Desktop**: ${BUILT_DESKTOPS} 
+            - **Releases**: ${BUILT_RELEASES}
+            - **Build Type**: Stable
+            - **Verification**: sha256sum and GPG signature
+            
+            <br>
+            Please note that Armbian Rolling Releases are not recommended for production environments, as these builds are not thoroughly tested. However, in most cases, they should work well. 
+            
+            <br>
+            </p>" > body.html
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: body.html
+          files: |
+            artifacts/armbian-boca-tcn200-legacy-5.10/*.img*
+            artifacts/armbian-boca-tcn200-vendor-6.1/*.img*
+          tag_name: boca-tcn200-stable-${{ github.run_id }}  # 自动生成唯一标签
+          name: Armbian Stable - boca-tcn200 (${{ github.run_id }})
