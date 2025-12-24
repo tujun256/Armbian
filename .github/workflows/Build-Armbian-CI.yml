@@ -1,4 +1,4 @@
-name: Build Armbian Stable (boca-tcn200)
+name: Build-Armbian-CI
 
 on:
   workflow_dispatch:  # 手动触发编译
