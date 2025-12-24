@@ -1,6 +1,5 @@
 # Workflow Name
 name: "Armbian Build Stable"
-
 # ====================================================================
 #  TRIGGERS
 #  Defines when this workflow will run.
@@ -11,7 +10,6 @@ on:
     
   workflow_dispatch:
     inputs:
-
       BOARD:
         type: choice
         description: 'Board'
@@ -21,8 +19,7 @@ on:
         - ufi001c
         - uz801
         - all
-        default: 'all'
-
+        default: 'boca-tcn200'
       RELEASE_CHOICE:
         type: choice
         description: "Which release(s) to build"
@@ -39,8 +36,7 @@ on:
         - plucky
         - sid
         - trixie
-        default: 'default_schedule'
-
+        default: 'bookworm'
       DESKTOP:
         type: choice
         description: "Desktop environment"
@@ -58,13 +54,11 @@ on:
         - xmonad
         - minimal_and_server
         default: 'minimal_and_server'
-
       ENABLE_EXTENSIONS:
         type: choice
         description: "Armbian extension packages"
         options: [ 'mesa-vpu', ' ' ]
         default: "mesa-vpu"
-
       DOCKER:
         type: choice
         description: "Build type: yes = Docker, no = Actions"
@@ -78,7 +72,6 @@ on:
         options: [ 'yes', 'no' ]
         type: choice
         default: 'no'
-
       ROOTFS:
         type: choice
         description: "Root filesystem"
@@ -86,23 +79,19 @@ on:
         - ext4
         - btrfs
         default: 'ext4'
-
 # ====================================================================
 #  PERMISSIONS & CONCURRENCY
 # ====================================================================
 permissions:
   contents: write
   pages: write
-
 concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: false
-
 env:
-  DEFAULT_SCHEDULE_RELEASES: "plucky noble trixie"
-  ALL_RELEASES: "bookworm bullseye buster focal jammy noble oracular plucky sid trixie"
-  BOARD: "lemonpi som3588-cat ufi001c uz801"
-
+  DEFAULT_SCHEDULE_RELEASES: "bookworm"  # 强制默认发行版为bookworm
+  ALL_RELEASES: "bookworm"  # 仅保留bookworm发行版
+  BOARD: "boca-tcn200"  # 仅保留boca-tcn200主板
 # ====================================================================
 #  JOBS
 # ====================================================================
@@ -124,7 +113,6 @@ jobs:
       BOARD: ${{ steps.set_matrix.outputs.BOARD }}
       RELEASE: ${{ steps.set_matrix.outputs.RELEASE }}
       VERSION: ${{ steps.get_version.outputs.VERSION }}
-
     steps:
       - name: Cache build dependencies
         uses: actions/cache@v4
@@ -154,7 +142,6 @@ jobs:
         with:
           repository: armbian/os
           path: os
-
       - name: "Get Armbian Version"
         id: get_version
         run: |
@@ -165,19 +152,12 @@ jobs:
       - name: "Set and Log Release Matrix"
         id: set_matrix
         run: |
-          RELEASE_STRING=""
-          if [[ "${{ github.event_name }}" == "schedule" || "${{ inputs.RELEASE_CHOICE }}" == "default_schedule" ]]; then
-            RELEASE_STRING="${{ env.DEFAULT_SCHEDULE_RELEASES }}"
-          elif [[ "${{ inputs.RELEASE_CHOICE }}" == "all" ]]; then
-            RELEASE_STRING="${{ env.ALL_RELEASES }}"
-          else
-            RELEASE_STRING="${{ inputs.RELEASE_CHOICE }}"
-          fi
+          # 强制锁定：仅编译boca-tcn200 + bookworm（忽略输入和触发方式）
+          RELEASE_STRING="bookworm"
+          BOARD_STRING="boca-tcn200"
           
           echo "Selected releases to build: ${RELEASE_STRING}"
-
-          # Determine which board list to use with a single, unified expression
-          BOARD_STRING="${{ (github.event_name == 'schedule' || inputs.BOARD == 'all') && env.BOARD || inputs.BOARD }}"
+          echo "Selected board to build: ${BOARD_STRING}"
           
           # Convert space-separated strings from env into JSON arrays for matrix strategies.
           JSON_RELEASE=$(echo "${RELEASE_STRING}" | jq -c -R 'split(" ") | map(select(. != ""))')
@@ -189,7 +169,6 @@ jobs:
           echo "--- Release Matrix Generated ---"
           echo "Matrix_RELEASE: ${JSON_RELEASE}"
           echo "Matrix_BOARD: ${JSON_BOARD}"
-
   # ====================================================================
   # JOB 1: Build Kernel Packages
   # ====================================================================
@@ -203,7 +182,6 @@ jobs:
       matrix:
         BRANCH: [vendor]
         BOARD: ${{ fromJson(needs.Prepare_Build.outputs.BOARD) }}
-
     steps:
       - name: "Checkout Board Source"
         uses: actions/checkout@v4
@@ -211,7 +189,6 @@ jobs:
           fetch-depth: 0
           clean: false
           path: custom
-
       - name: "Checkout Build System"
         uses: actions/checkout@v4
         with:
@@ -219,7 +196,6 @@ jobs:
           clean: false
           ref: main
           path: build
-
       - name: "Checkout OS Source" 
         uses: actions/checkout@v4
         with:
@@ -227,7 +203,6 @@ jobs:
           fetch-depth: 0
           clean: false
           path: os
-
       - name: "Setup Kernel Build Environment"
         shell: bash
         run: |
@@ -236,7 +211,6 @@ jobs:
           sudo -E apt-get -y purge azure-cli ghc* zulu* llvm* firefox google* dotnet* openjdk* mysql* php* mongodb* dotnet* moby* snapd* android* || true
           sudo -E apt-get -qq autoremove --purge && sudo -E apt-get -qq clean
           sudo dpkg --list | grep "^rc" | cut -d " " -f 3 | xargs -r sudo dpkg --purge || true
-
           # Automatically sync rockchip64-6.18 patches to all existing rockchip64-6.* directories under build
           for verdir in ./build/patch/kernel/archive/rockchip64-6.*; do
             if [ -d "$verdir" ]; then
@@ -253,7 +227,6 @@ jobs:
           mkdir -p ./build/userpatches
           cp -rf ./custom/Addboard/* ./build
           cp -rf ./os/userpatches/* ./build/userpatches
-
       - name: "Compile Kernel [${{ matrix.BOARD }} ${{ matrix.BRANCH }}]"
         shell: bash
         run: |
@@ -273,14 +246,12 @@ jobs:
             PREFER_DOCKER="${{ needs.Prepare_Build.outputs.DOCKER }}" \
             EXPERT="yes" \
             VENDOR=Armbian
-
       - name: "Upload Kernel Artifact"
         uses: actions/upload-artifact@v4
         with:
           name: kernel-debs-${{ matrix.BOARD }}-${{ matrix.BRANCH }}
           path: build/output/debs/*.deb
           if-no-files-found: error
-
   # ====================================================================
   # JOB 2: Build Armbian Image
   # ====================================================================
@@ -303,7 +274,6 @@ jobs:
           fetch-depth: 0
           clean: false
           path: custom
-
       - name: "Checkout Build System"
         uses: actions/checkout@v4
         with:
@@ -311,7 +281,6 @@ jobs:
           clean: false
           ref: main
           path: build
-
       - name: "Checkout OS Source"
         uses: actions/checkout@v4
         with:
@@ -319,13 +288,11 @@ jobs:
           fetch-depth: 0
           clean: false
           path: os
-
       - name: "Download Kernel Artifact"
         uses: actions/download-artifact@v4
         with:
           name: kernel-debs-${{ matrix.BOARD }}-${{ matrix.BRANCH }}
           path: ./prebuilt-kernel-debs
-
       - name: "Setup Image Build Environment"
         shell: bash
         run: |
@@ -349,7 +316,6 @@ jobs:
             echo "DESKTOP_APPGROUPS_SELECTED="browsers"" >> $GITHUB_ENV
             echo "DESKTOP_ENVIRONMENT_CONFIG_NAME="config_base"" >> $GITHUB_ENV
           fi
-
           # Automatically sync rockchip64-6.18 patches to all existing rockchip64-6.* directories under build
           for verdir in ./build/patch/kernel/archive/rockchip64-6.*; do
             if [ -d "$verdir" ]; then
@@ -368,12 +334,6 @@ jobs:
           cp -rf ./os/userpatches/* ./build/userpatches
           cp -v ./prebuilt-kernel-debs/*.deb ./build/output/debs/
           
-      - name: "Import GPG Key for Signing Images"
-        uses: crazy-max/ghaction-import-gpg@v6
-        with:
-          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
-          passphrase: ${{ secrets.GPG_PASSPHRASE }}
-
       - name: "Compile Image [${{ matrix.BOARD }} ${{ matrix.RELEASE }}]"
         shell: bash
         run: |
@@ -400,8 +360,7 @@ jobs:
             NETWORKING_STACK="network-manager" \
             EXPERT="yes" \
             VENDOR=Armbian \
-            COMPRESS_OUTPUTIMAGE="sha,gpg,xz"
-
+            COMPRESS_OUTPUTIMAGE="sha,xz"  # 移除GPG压缩选项，仅保留SHA校验和XZ压缩
       - name: "Package Flasher for UFI/UZ Devices"
         if: contains(fromJson('["ufi001c", "uz801"]'), matrix.BOARD)
         shell: bash
@@ -414,19 +373,16 @@ jobs:
             echo "::error:: Flasher packaging script not found!"
             exit 1
           fi
-
       - name: "Record Successful Image Build Info"
         shell: bash
         run: |
           # Create a marker file to track which board/branch combinations succeeded.
           echo "${{ matrix.BOARD }},${{ matrix.BRANCH }},${{ matrix.RELEASE }},${{ matrix.DESKTOP }}" > matrix-info.txt
-
       - name: "Upload Matrix Info Artifact"
         uses: actions/upload-artifact@v4
         with:
           name: matrix-info-${{ matrix.BOARD }}-${{ matrix.BRANCH }}-${{ matrix.RELEASE }}-${{ matrix.DESKTOP }}
           path: matrix-info.txt
-
       - name: "Upload Image to GitHub Release"
         uses: ncipollo/release-action@v1
         if: success()
@@ -439,7 +395,6 @@ jobs:
           removeArtifacts: false
           replacesArtifacts: false 
           token: ${{ secrets.GITHUB_TOKEN }}
-
   # ====================================================================
   # JOB 3: Publish GitHub Release
   # ====================================================================
@@ -448,13 +403,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: [Prepare_Build, Build_Image]
     if: always() 
-
     steps:
       - name: "Download All Artifacts"
         uses: actions/download-artifact@v4
         with:
           path: artifacts/
-
       - name: "Rename Kernel DEBs for Release"
         shell: bash
         run: |
@@ -494,8 +447,7 @@ jobs:
             - **Desktop**: ${BUILT_DESKTOPS} 
             - **Releases**: ${BUILT_RELEASES}
             - **Build Type**: ${{ needs.Prepare_Build.outputs.NIGHTLY == 'yes' && 'Nightly' || 'Stable' }}
-            - **Verification**: sha256sum and GPG signature
-            
+            - **Verification**: sha256sum  # 移除GPG签名描述
             <br>
             Please note that Armbian Rolling Releases are not recommended for production environments, as these builds are not thoroughly tested. However, in most cases, they should work well. 
             
@@ -515,7 +467,6 @@ jobs:
           replacesArtifacts: false 
           token: ${{ secrets.GITHUB_TOKEN }}
           bodyFile: "body.html"
-
   # ====================================================================
   # JOB 4: Update APT Repository
   # ====================================================================
@@ -524,17 +475,13 @@ jobs:
     runs-on: ubuntu-latest
     needs: [Publish_Release]
     if: success()
-    env:
-      # Expose GPG Key ID for the reprepro script to use for signing.
-      GPG_KEY_ID: ${{ secrets.GPG_SIGNING_KEY_ID }}
-
+    # 已移除GPG_KEY_ID环境变量
     steps:
       - name: "Download all kernel DEB packages"
         uses: actions/download-artifact@v4
         with:
           pattern: kernel-debs-*
           path: artifacts/debs
-
       - name: "Download MonitorPanel DEB fpackages"
         uses: dsaltares/fetch-gh-release-asset@1.1.0
         continue-on-error: true
@@ -543,16 +490,8 @@ jobs:
           version: 'latest'    
           file: 'monitorpanel-.*_arm64.deb'
           target: 'artifacts/debs/monitorpanel/monitorpanel.deb' 
-
-      - name: "Import GPG Key"
-        uses: crazy-max/ghaction-import-gpg@v6
-        with:
-          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
-          passphrase: ${{ secrets.GPG_PASSPHRASE }}
-
       - name: "Install APT repository tools"
         run: sudo apt-get update && sudo apt-get install -y reprepro
-
       - name: "Setup APT Repository Structure"
         shell: bash
         run: |
@@ -576,13 +515,11 @@ jobs:
           Architectures: arm64
           Components: ${COMPONENTS}
           Description: Custom APT repository for Armbian
-          SignWith: ${{ env.GPG_KEY_ID }}
-
+          # 已移除SignWith GPG签名配置
           EOF
           done
           echo "--- APT distributions config ---"
           cat repo/conf/distributions
-
       - name: "Add all DEB packages to repository"
         shell: bash
         run: |
@@ -599,12 +536,10 @@ jobs:
               fi
             done
           done
-
       - name: "Add MonitorPanel DEB package to 'main' component"
         shell: bash
         run: |
           MONITOR_DEB_FILE="artifacts/debs/monitorpanel/monitorpanel.deb"
-
           if [ -s "$MONITOR_DEB_FILE" ]; then
             echo "--- Processing MonitorPanel package ---"
             for codename in $RELEASE; do
@@ -618,7 +553,6 @@ jobs:
           else
             echo "::warning::MonitorPanel DEB package not found or empty, skipping."
           fi
-
       - name: "Deploy repository to GitHub Pages"
         uses: peaceiris/actions-gh-pages@v4
         with:
@@ -626,4 +560,3 @@ jobs:
           publish_dir: ./repo
           publish_branch: apt-repo
           force_orphan: true
-          
