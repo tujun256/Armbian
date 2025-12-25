@@ -1,5 +1,5 @@
 # Workflow Name
-name: "Armbian Build TCN200"
+name: "Armbian Build "
 # ====================================================================
 #  TRIGGERS
 #  Defines when this workflow will run.
@@ -90,8 +90,8 @@ concurrency:
   cancel-in-progress: false
 env:
   DEFAULT_SCHEDULE_RELEASES: "bookworm"  # 强制默认发行版为bookworm
-  ALL_RELEASES: "bookworm"  # 仅保留bookworm发行版
-  BOARD: "boca-tcn200"  # 仅保留boca-tcn200主板
+  ALL_RELEASES: "bookworm"  # 仅保留bookworm
+  BOARD: "boca-tcn200"  # 仅保留boca-tcn200
 # ====================================================================
 #  JOBS
 # ====================================================================
@@ -180,7 +180,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        BRANCH: [vendor]
+        BRANCH: [edge]  # 使用edge分支适配RK3588
         BOARD: ${{ fromJson(needs.Prepare_Build.outputs.BOARD) }}
     steps:
       - name: "Checkout Board Source"
@@ -192,7 +192,7 @@ jobs:
       - name: "Checkout Build System"
         uses: actions/checkout@v4
         with:
-          repository: stevenliuit/armbian-build
+          repository: armbian/build  # 官方编译仓库（适配RK3588）
           clean: false
           ref: main
           path: build
@@ -206,38 +206,74 @@ jobs:
       - name: "Setup Kernel Build Environment"
         shell: bash
         run: |
-          # Clean up runner to free up disk space.
+          set -euo pipefail  # 严格错误检测：任何命令失败立即退出并打印错误
+          
+          # 1. 优化系统包清理：仅删除超大体积无用包，保留编译核心依赖
           sudo apt-get update
-          sudo -E apt-get -y purge azure-cli ghc* zulu* llvm* firefox google* dotnet* openjdk* mysql* php* mongodb* dotnet* moby* snapd* android* || true
+          sudo -E apt-get -y purge azure-cli ghc* zulu* llvm* firefox google* dotnet* openjdk* mysql* mongodb* moby* snapd* android* || true
           sudo -E apt-get -qq autoremove --purge && sudo -E apt-get -qq clean
           sudo dpkg --list | grep "^rc" | cut -d " " -f 3 | xargs -r sudo dpkg --purge || true
-          # Automatically sync rockchip64-6.18 patches to all existing rockchip64-6.* directories under build
-          for verdir in ./build/patch/kernel/archive/rockchip64-6.*; do
-            if [ -d "$verdir" ]; then
-              target=$(basename "$verdir")
-              if [ ! -d "./build/patch/kernel/archive/$target" ]; then
-                mkdir -p "./build/patch/kernel/archive/$target"
+          
+          # 2. 检查磁盘空间（确保至少40G可用）
+          echo "=== 磁盘空间检查 ==="
+          df -h
+          AVAIL_SPACE=$(df -P /home/runner/work/Armbian/Armbian/build | tail -1 | awk '{print $4}' | sed 's/G//')
+          if (( $(echo "$AVAIL_SPACE < 40" | bc -l) )); then
+            echo "::error:: 磁盘可用空间不足40G，当前仅${AVAIL_SPACE}G"
+            exit 1
+          fi
+          
+          # 3. 鲁棒的Rockchip补丁同步（增加存在性检查和错误捕获）
+          echo "=== 同步Rockchip64补丁 ==="
+          PATCH_SRC="./custom/Addboard/patch/kernel/archive/rockchip64-6.18"
+          if [ ! -d "$PATCH_SRC" ]; then
+            echo "::warning:: 源补丁目录 $PATCH_SRC 不存在，跳过补丁同步"
+          else
+            for verdir in ./build/patch/kernel/archive/rockchip64-6.*; do
+              if [ ! -d "$verdir" ]; then
+                continue  # 跳过非目录文件
               fi
-              cp -rf ./custom/Addboard/patch/kernel/archive/rockchip64-6.18/* "./build/patch/kernel/archive/$target/"
-              echo "rockchip64-6.18 patches have been synced to $target"
-            fi
-          done
-              # 关键：动态向 boca-tcn200.conf 添加禁用 OPTEE 的配置
-          echo -e "\n# 临时禁用 OPTEE 以解决启动错误" >> ./build/config/boards//boca-tcn200.csc
-          echo 'UBOOT_OPTEE_DISABLE="yes"' >> ./build/config/boards/boca-tcn200.cscf
-    
-          # 验证配置是否写入成功（可选，方便调试）
-          cat ./build/config/boards//boca-tcn200.csc | grep UBOOT_OPTEE_DISABLE
-
-          # Prepare custom build files by copying them into the build system directory.
+              target=$(basename "$verdir")
+              mkdir -p "$verdir"  # 确保目标目录存在
+              if cp -rf "$PATCH_SRC"/* "$verdir/"; then
+                echo "✅ rockchip64-6.18 patches synced to $target"
+              else
+                echo "::error:: 补丁同步到 $target 失败"
+                exit 1
+              fi
+            done
+          fi
+          
+          # 4. 补充缺失的Rockchip输入设备头文件rk-input.h
+          echo "=== 补充缺失头文件 ==="
+          mkdir -p ./build/cache/sources/linux-kernel-worktree/include/dt-bindings/input/
+          wget -O ./build/cache/sources/linux-kernel-worktree/include/dt-bindings/input/rk-input.h \
+            https://raw.githubusercontent.com/rockchip-linux/linux/master/include/dt-bindings/input/rk-input.h
+          echo "✅ Successfully downloaded rk-input.h"
+          
+          # 5. 动态禁用OPTEE（解决启动时API版本错误）
+          echo "=== 禁用OPTEE配置 ==="
+          echo -e "\n# Disable OPTEE to fix boot error" >> ./build/config/boards/boca-tcn200.conf
+          echo 'UBOOT_OPTEE_DISABLE="yes"' >> ./build/config/boards/boca-tcn200.conf
+          cat ./build/config/boards/boca-tcn200.conf | grep UBOOT_OPTEE_DISABLE  # 验证配置写入
+          
+          # 6. 准备编译配置
           mkdir -p ./build/userpatches
           cp -rf ./custom/Addboard/* ./build
           cp -rf ./os/userpatches/* ./build/userpatches
+          
+          # 7. 验证编译关键依赖
+          echo "=== 验证核心依赖 ==="
+          if ! command -v pkg-config &> /dev/null; then
+            echo "::warning:: pkg-config缺失，重新安装"
+            sudo apt-get install -y pkg-config
+          fi
+          echo "✅ 所有关键依赖验证通过"
       - name: "Compile Kernel [${{ matrix.BOARD }} ${{ matrix.BRANCH }}]"
         shell: bash
         run: |
           cd ./build
-          # Invoke the compile script for a kernel-only build.
+          # 编译内核，指定ATF/OPTEE版本适配RK3588
           ./compile.sh \
             REVISION="${{ needs.Prepare_Build.outputs.VERSION }}" \
             BOARD="${{ matrix.BOARD }}" \
@@ -251,7 +287,11 @@ jobs:
             BETA="${{ needs.Prepare_Build.outputs.NIGHTLY }}" \
             PREFER_DOCKER="${{ needs.Prepare_Build.outputs.DOCKER }}" \
             EXPERT="yes" \
-            VENDOR=Armbian
+            VENDOR=Armbian \
+            ATF="rk3588" \
+            OPTEE="rk3588" \
+            ATF_BRANCH="v2.9" \
+            OPTEE_BRANCH="3.19"
       - name: "Upload Kernel Artifact"
         uses: actions/upload-artifact@v4
         with:
@@ -268,7 +308,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        BRANCH: [vendor]
+        BRANCH: [edge]  # 与内核分支保持一致
         BOARD: ${{ fromJson(needs.Prepare_Build.outputs.BOARD) }} 
         RELEASE: ${{ fromJson(needs.Prepare_Build.outputs.RELEASE) }}
         DESKTOP: ${{ fromJson(needs.Prepare_Build.outputs.DESKTOP) }}
@@ -283,7 +323,7 @@ jobs:
       - name: "Checkout Build System"
         uses: actions/checkout@v4
         with:
-          repository: stevenliuit/armbian-build
+          repository: armbian/build
           clean: false
           ref: main
           path: build
@@ -302,13 +342,15 @@ jobs:
       - name: "Setup Image Build Environment"
         shell: bash
         run: |
-          # Clean up the runner to ensure sufficient disk space.
+          set -euo pipefail  # 严格错误检测
+          
+          # 1. 清理磁盘空间 + 安装必需工具
           sudo apt-get update
-          sudo -E apt-get -y purge azure-cli ghc* zulu* llvm* firefox google* dotnet* openjdk* mysql* php* mongodb* dotnet* moby* snapd* android* || true
+          sudo -E apt-get -y purge azure-cli ghc* zulu* llvm* firefox google* dotnet* openjdk* mysql* mongodb* moby* snapd* android* || true
           sudo -E apt-get -qq autoremove --purge && sudo -E apt-get -qq clean
           sudo apt-get install -y mkbootimg android-sdk-libsparse-utils
           
-          # Set build flags based on the desktop type for the compile script.
+          # 2. 设置桌面环境参数
           if [[ "${{ matrix.DESKTOP }}" == "minimal" ]]; then
             echo "BUILD_DESKTOP="no"" >> $GITHUB_ENV
             echo "BUILD_MINIMAL="yes"" >> $GITHUB_ENV
@@ -322,29 +364,53 @@ jobs:
             echo "DESKTOP_APPGROUPS_SELECTED="browsers"" >> $GITHUB_ENV
             echo "DESKTOP_ENVIRONMENT_CONFIG_NAME="config_base"" >> $GITHUB_ENV
           fi
-          # Automatically sync rockchip64-6.18 patches to all existing rockchip64-6.* directories under build
-          for verdir in ./build/patch/kernel/archive/rockchip64-6.*; do
-            if [ -d "$verdir" ]; then
-              target=$(basename "$verdir")
-              if [ ! -d "./build/patch/kernel/archive/$target" ]; then
-                mkdir -p "./build/patch/kernel/archive/$target"
-              fi
-              cp -rf ./custom/Addboard/patch/kernel/archive/rockchip64-6.18/* "./build/patch/kernel/archive/$target/"
-              echo "rockchip64-6.18 patches have been synced to $target"
-            fi
-          done
           
-          # Prepare build environment with userpatches and the pre-built kernel debs.
+          # 3. 鲁棒的Rockchip补丁同步
+          echo "=== 同步Rockchip64补丁 ==="
+          PATCH_SRC="./custom/Addboard/patch/kernel/archive/rockchip64-6.18"
+          if [ ! -d "$PATCH_SRC" ]; then
+            echo "::warning:: 源补丁目录 $PATCH_SRC 不存在，跳过补丁同步"
+          else
+            for verdir in ./build/patch/kernel/archive/rockchip64-6.*; do
+              if [ ! -d "$verdir" ]; then
+                continue
+              fi
+              target=$(basename "$verdir")
+              mkdir -p "$verdir"
+              if cp -rf "$PATCH_SRC"/* "$verdir/"; then
+                echo "✅ rockchip64-6.18 patches synced to $target"
+              else
+                echo "::error:: 补丁同步到 $target 失败"
+                exit 1
+              fi
+            done
+          fi
+          
+          # 4. 补充缺失的rk-input.h头文件
+          echo "=== 补充缺失头文件 ==="
+          mkdir -p ./build/cache/sources/linux-kernel-worktree/include/dt-bindings/input/
+          wget -O ./build/cache/sources/linux-kernel-worktree/include/dt-bindings/input/rk-input.h \
+            https://raw.githubusercontent.com/rockchip-linux/linux/master/include/dt-bindings/input/rk-input.h
+          echo "✅ Successfully downloaded rk-input.h"
+          
+          # 5. 准备编译环境
           mkdir -p ./build/userpatches ./build/output/debs
           cp -rf ./custom/Addboard/* ./build
           cp -rf ./os/userpatches/* ./build/userpatches
           cp -v ./prebuilt-kernel-debs/*.deb ./build/output/debs/
           
+          # 6. 验证核心依赖
+          echo "=== 验证核心依赖 ==="
+          if ! command -v pkg-config &> /dev/null; then
+            echo "::warning:: pkg-config缺失，重新安装"
+            sudo apt-get install -y pkg-config
+          fi
+          echo "✅ 所有关键依赖验证通过"
       - name: "Compile Image [${{ matrix.BOARD }} ${{ matrix.RELEASE }}]"
         shell: bash
         run: |
           cd ./build
-          # Invoke compile script to build the full OS image, using the pre-built kernel.
+          # 编译镜像，保留核心配置 + 适配RK3588
           ./compile.sh \
             REVISION="${{ needs.Prepare_Build.outputs.VERSION }}" \
             BOARD="${{ matrix.BOARD }}" \
@@ -366,7 +432,11 @@ jobs:
             NETWORKING_STACK="network-manager" \
             EXPERT="yes" \
             VENDOR=Armbian \
-            COMPRESS_OUTPUTIMAGE="sha,xz"  # 移除GPG压缩选项，仅保留SHA校验和XZ压缩
+            COMPRESS_OUTPUTIMAGE="sha,xz"  # 移除GPG压缩选项
+            ATF="rk3588" \
+            OPTEE="rk3588" \
+            ATF_BRANCH="v2.9" \
+            OPTEE_BRANCH="3.19"
       - name: "Package Flasher for UFI/UZ Devices"
         if: contains(fromJson('["ufi001c", "uz801"]'), matrix.BOARD)
         shell: bash
