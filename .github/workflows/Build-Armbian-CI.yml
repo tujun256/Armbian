@@ -227,7 +227,7 @@ jobs:
           echo 'UBOOT_OPTEE_DISABLE="yes"' >> ./build/config/boards/boca-tcn200.cscf
     
           # 验证配置是否写入成功（可选，方便调试）
-         cat ./build/config/boards//boca-tcn200.csc | grep UBOOT_OPTEE_DISABLE
+          cat ./build/config/boards//boca-tcn200.csc | grep UBOOT_OPTEE_DISABLE
 
           # Prepare custom build files by copying them into the build system directory.
           mkdir -p ./build/userpatches
