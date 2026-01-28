@@ -90,12 +90,9 @@ jobs:
             BOARD=${{ env.BOARD }} \
             BRANCH=legacy \
             RELEASE=jammy \
-            FORCE_BOARD_FALLBACK=yes \
-            NONINTERACTIVE=yes \
-            SKIP_CONFIGURE=yes \
-            CONFIGURE=no \
             BUILD_MINIMAL=yes \
-            BUILD_DESKTOP=no
+            BUILD_DESKTOP=no \
+            KERNEL_CONFIGURE=no
 
       - name: Upload build results
         if: always()
