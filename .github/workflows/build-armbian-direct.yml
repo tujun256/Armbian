@@ -1,7 +1,16 @@
-name: Build Armbian (boca-tcn200) - Direct Clone
+name: Build Armbian (boca-tcn200) - Replace CSC File
 
 on:
-  workflow_dispatch:  # 仅手动触发，避免资源浪费
+  workflow_dispatch:  # 仅手动触发
+    inputs:  # 【新增】手动触发时可指定版本号，避免Release标签重复
+      release_version:
+        description: '固件版本号（如v1.0.0）'
+        required: true
+        default: 'v1.0.0'
+      release_name:
+        description: 'Release名称（如boca-tcn200-legacy-jammy-v1.0.0）'
+        required: true
+        default: 'boca-tcn200-legacy-jammy-v1.0.0'
 
 jobs:
   build:
@@ -9,28 +18,48 @@ jobs:
     env:
       DEBIAN_FRONTEND: noninteractive
       BOARD: boca-tcn200
-      ARMBIAN_REPO: https://github.com/alerice/armbian-build.git  # 原仓库地址
-      ARMBIAN_DIR: ./armbian-build  # 克隆后的本地目录名
+      ARMBIAN_REPO: https://github.com/alerice/armbian-build.git
+      ARMBIAN_DIR: ./armbian-build
+      USER_CSC_FILE: ./Addboard/config/boards/boca-tcn200.csc
+      TARGET_CSC_FILE: ./armbian-build/build/config/boards/boca-tcn200.csc
 
     steps:
-      # 步骤1：直接克隆原仓库（替代actions/checkout）
-      - name: Clone armbian-build repository
+      - name: Checkout your repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Debug - Check user CSC file
         run: |
-          # 克隆原仓库，拉取完整历史和子模块（Armbian编译必需）
-          git clone --depth=0 --recursive ${{ env.ARMBIAN_REPO }} ${{ env.ARMBIAN_DIR }}
-          # 进入克隆后的目录，确认分支（默认main/master）
+          echo "=== 检查你仓库的csc文件 ==="
+          if [ -f "${{ env.USER_CSC_FILE }}" ]; then
+            echo "✅ 找到你的csc文件：${{ env.USER_CSC_FILE }}"
+            ls -la ${{ env.USER_CSC_FILE }}
+          else
+            echo "❌ 未找到你的csc文件：${{ env.USER_CSC_FILE }}"
+            exit 1
+          fi
+
+      - name: Clone alerice/armbian-build repository
+        run: |
+          git clone --recursive ${{ env.ARMBIAN_REPO }} ${{ env.ARMBIAN_DIR }}
           cd ${{ env.ARMBIAN_DIR }}
+          echo "=== 当前分支信息 ==="
           git branch -v
+          echo "=== 查看boca-tcn200支持的内核分支 ==="
+          grep -i "KERNEL_TARGET" config/boards/boca-tcn200.csc || echo "未找到KERNEL_TARGET配置"
 
-      # 步骤2：调试 - 查看仓库文件结构（确认脚本位置）
-      - name: Debug - List repository files
+      - name: Replace boca-tcn200.csc file
         run: |
-          echo "=== 克隆后的仓库文件列表 ==="
-          ls -la ${{ env.ARMBIAN_DIR }}
-          echo "=== 检查BOARD配置文件是否存在 ==="
-          ls -la ${{ env.ARMBIAN_DIR }}/config/boards/ | grep -i ${{ env.BOARD }} || echo "警告：未找到boca-tcn200配置文件"
+          mkdir -p $(dirname ${{ env.TARGET_CSC_FILE }})
+          if [ -f "${{ env.TARGET_CSC_FILE }}" ]; then
+            cp ${{ env.TARGET_CSC_FILE }} ${{ env.TARGET_CSC_FILE }}.bak
+            echo "✅ 已备份原csc文件"
+          fi
+          cp -fv ${{ env.USER_CSC_FILE }} ${{ env.TARGET_CSC_FILE }}
+          echo "✅ 已替换csc文件"
+          grep -i "KERNEL_TARGET" ${{ env.TARGET_CSC_FILE }}
 
-      # 步骤3：安装系统依赖（和之前一致，确保完整）
       - name: Install build dependencies
         run: |
           sudo apt update -y
@@ -42,46 +71,64 @@ jobs:
             uuid-runtime grub-efi-amd64-bin grub-pc-bin mtools \
             libelf-dev libssl-dev dwarves zstd device-tree-compiler
 
-      # 步骤4：初始化编译环境（适配脚本名称差异）
       - name: Initialize build environment
         run: |
           cd ${{ env.ARMBIAN_DIR }}
-          # 适配Armbian脚本差异（build.sh/compile.sh）
           if [ -f "build.sh" ]; then
             chmod +x build.sh
-            ./build.sh --help  # 初始化环境，生成compile.sh（部分分支需要）
+            ./build.sh --help
           fi
-          # 确保编译脚本有执行权限
           if [ -f "compile.sh" ]; then
             chmod +x compile.sh
           elif [ -f "build.sh" ]; then
-            ln -s build.sh compile.sh  # 统一调用方式
+            ln -s build.sh compile.sh
           else
-            echo "错误：未找到编译脚本（compile.sh/build.sh）！"
+            echo "错误：未找到编译脚本！"
             exit 1
           fi
 
-      # 步骤5：执行编译（核心步骤，指定BOARD）
-      - name: Build Armbian image for boca-tcn200
+      - name: Build Armbian image
         run: |
           cd ${{ env.ARMBIAN_DIR }}
-          # 执行编译命令，参数简化以优先保证成功
           ./compile.sh \
             BOARD=${{ env.BOARD }} \
-            BRANCH=current \
+            BRANCH=legacy \
+            RELEASE=jammy \
             BUILD_MINIMAL=yes \
             BUILD_DESKTOP=no \
-            KERNEL_ONLY=no \
             KERNEL_CONFIGURE=no
 
-      # 步骤6：上传产物（含日志，方便排查问题）
-      - name: Upload build results
-        if: always()  # 即使编译失败，也上传日志
+      - name: Upload build results (artifact)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: armbian-boca-tcn200-results
           path: |
             ${{ env.ARMBIAN_DIR }}/output/images/*.img*
             ${{ env.ARMBIAN_DIR }}/output/images/*.zip*
-            ${{ env.ARMBIAN_DIR }}/compile.log  # 编译日志
+            ${{ env.ARMBIAN_DIR }}/compile.log
+            ${{ env.TARGET_CSC_FILE }}.bak
           retention-days: 7
+
+      # ====================== 以下为【新增】Release自动发布步骤 ======================
+      - name: Create GitHub Release  # 创建Release标签和页面
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # GitHub内置token，无需手动配置
+        with:
+          tag_name: ${{ github.event.inputs.release_version }}  # 标签名=手动输入的版本号
+          release_name: ${{ github.event.inputs.release_name }}  # Release名称=手动输入的名称
+          draft: false  # 非草稿，直接发布
+          prerelease: false  # 非预发布（如需预发布改为true）
+
+      - name: Upload Firmware to Release  # 遍历固件文件，上传到刚创建的Release
+        uses: svenstaro/upload-release-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ${{ env.ARMBIAN_DIR }}/output/images/*  # 匹配所有编译出的固件文件
+          file_glob: true  # 开启文件通配符匹配
+          tag: ${{ github.event.inputs.release_version }}  # 关联到上述Release标签
+          overwrite: true  # 若标签重复，覆盖原有资产（可选）
