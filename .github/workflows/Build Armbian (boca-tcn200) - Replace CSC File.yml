@@ -12,7 +12,7 @@ jobs:
       ARMBIAN_REPO: https://github.com/alerice/armbian-build.git
       ARMBIAN_DIR: ./armbian-build
       USER_CSC_FILE: ./Addboard/config/boards/boca-tcn200.csc
-      TARGET_CSC_FILE: ./armbian-build/build/config/boards/boca-tcn200.csc
+      TARGET_CSC_FILE: ./armbian-build/config/boards/boca-tcn200.csc
 
     steps:
       - name: Checkout your repository
@@ -38,7 +38,6 @@ jobs:
           echo "=== 当前分支信息 ==="
           git branch -v
           echo "=== 查看boca-tcn200支持的内核分支 ==="
-          # 额外调试：查看该BOARD配置中支持的KERNEL_TARGET
           grep -i "KERNEL_TARGET" ${{ env.TARGET_CSC_FILE }} || echo "未找到KERNEL_TARGET配置"
 
       - name: Replace boca-tcn200.csc file
@@ -50,7 +49,6 @@ jobs:
           fi
           cp -fv ${{ env.USER_CSC_FILE }} ${{ env.TARGET_CSC_FILE }}
           echo "✅ 已替换csc文件"
-          # 验证替换后的KERNEL_TARGET
           grep -i "KERNEL_TARGET" ${{ env.TARGET_CSC_FILE }}
 
       - name: Install build dependencies
@@ -80,21 +78,19 @@ jobs:
             exit 1
           fi
 
-      # 核心修改：修复编译参数，禁用交互，指定正确分支
+      # 核心修复：移除所有行尾注释，简化参数格式，避免未知参数错误
       - name: Build Armbian image
         run: |
           cd ${{ env.ARMBIAN_DIR }}
-          # 关键修改：
-          # 1. BRANCH改为legacy（适配boca-tcn200支持的分支）
-          # 2. 添加RELEASE指定OS版本，避免交互式选择
-          # 3. 添加FORCE_BOARD_FALLBACK=yes，强制跳过分支验证的交互弹窗
-          # 4. 添加NONINTERACTIVE=yes，彻底禁用所有交互式操作
+          # 修复点1：移除所有行尾注释，确保参数仅包含键值对
+          # 修复点2：参数行末尾仅保留\，无多余空格/注释
+          # 修复点3：确保无空参数、无多余空格
           ./compile.sh \
             BOARD=${{ env.BOARD }} \
-            BRANCH=legacy \  # 改为该BOARD支持的分支
-            RELEASE=bookworm \  # 指定OS版本（Debian 12），避免交互选择
-            FORCE_BOARD_FALLBACK=yes \  # 强制跳过分支验证的交互弹窗
-            NONINTERACTIVE=yes \  # 禁用所有交互式操作
+            BRANCH=legacy \
+            RELEASE=bookworm \
+            FORCE_BOARD_FALLBACK=yes \
+            NONINTERACTIVE=yes \
             BUILD_MINIMAL=yes \
             BUILD_DESKTOP=no \
             KERNEL_ONLY=no \
