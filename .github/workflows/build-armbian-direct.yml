@@ -1,4 +1,4 @@
-name: Build Armbian (boca-tcn200) - Replace CSC File
+name: 2 
 
 on:
   workflow_dispatch:  # 仅手动触发
