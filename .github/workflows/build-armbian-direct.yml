@@ -1,0 +1,87 @@
+name: Build Armbian (boca-tcn200) - Direct Clone
+
+on:
+  workflow_dispatch:  # 仅手动触发，避免资源浪费
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      BOARD: boca-tcn200
+      ARMBIAN_REPO: https://github.com/alerice/armbian-build.git  # 原仓库地址
+      ARMBIAN_DIR: ./armbian-build  # 克隆后的本地目录名
+
+    steps:
+      # 步骤1：直接克隆原仓库（替代actions/checkout）
+      - name: Clone armbian-build repository
+        run: |
+          # 克隆原仓库，拉取完整历史和子模块（Armbian编译必需）
+          git clone --depth=0 --recursive ${{ env.ARMBIAN_REPO }} ${{ env.ARMBIAN_DIR }}
+          # 进入克隆后的目录，确认分支（默认main/master）
+          cd ${{ env.ARMBIAN_DIR }}
+          git branch -v
+
+      # 步骤2：调试 - 查看仓库文件结构（确认脚本位置）
+      - name: Debug - List repository files
+        run: |
+          echo "=== 克隆后的仓库文件列表 ==="
+          ls -la ${{ env.ARMBIAN_DIR }}
+          echo "=== 检查BOARD配置文件是否存在 ==="
+          ls -la ${{ env.ARMBIAN_DIR }}/config/boards/ | grep -i ${{ env.BOARD }} || echo "警告：未找到boca-tcn200配置文件"
+
+      # 步骤3：安装系统依赖（和之前一致，确保完整）
+      - name: Install build dependencies
+        run: |
+          sudo apt update -y
+          sudo apt full-upgrade -y
+          sudo apt install -y \
+            git curl wget build-essential libncurses5-dev libssl-dev \
+            bc flex bison kmod cpio rsync unzip zip qemu-user-static \
+            python3 python3-pip python3-setuptools parted dosfstools \
+            uuid-runtime grub-efi-amd64-bin grub-pc-bin mtools \
+            libelf-dev libssl-dev dwarves zstd device-tree-compiler
+
+      # 步骤4：初始化编译环境（适配脚本名称差异）
+      - name: Initialize build environment
+        run: |
+          cd ${{ env.ARMBIAN_DIR }}
+          # 适配Armbian脚本差异（build.sh/compile.sh）
+          if [ -f "build.sh" ]; then
+            chmod +x build.sh
+            ./build.sh --help  # 初始化环境，生成compile.sh（部分分支需要）
+          fi
+          # 确保编译脚本有执行权限
+          if [ -f "compile.sh" ]; then
+            chmod +x compile.sh
+          elif [ -f "build.sh" ]; then
+            ln -s build.sh compile.sh  # 统一调用方式
+          else
+            echo "错误：未找到编译脚本（compile.sh/build.sh）！"
+            exit 1
+          fi
+
+      # 步骤5：执行编译（核心步骤，指定BOARD）
+      - name: Build Armbian image for boca-tcn200
+        run: |
+          cd ${{ env.ARMBIAN_DIR }}
+          # 执行编译命令，参数简化以优先保证成功
+          ./compile.sh \
+            BOARD=${{ env.BOARD }} \
+            BRANCH=current \
+            BUILD_MINIMAL=yes \
+            BUILD_DESKTOP=no \
+            KERNEL_ONLY=no \
+            KERNEL_CONFIGURE=no
+
+      # 步骤6：上传产物（含日志，方便排查问题）
+      - name: Upload build results
+        if: always()  # 即使编译失败，也上传日志
+        uses: actions/upload-artifact@v4
+        with:
+          name: armbian-boca-tcn200-results
+          path: |
+            ${{ env.ARMBIAN_DIR }}/output/images/*.img*
+            ${{ env.ARMBIAN_DIR }}/output/images/*.zip*
+            ${{ env.ARMBIAN_DIR }}/compile.log  # 编译日志
+          retention-days: 7
