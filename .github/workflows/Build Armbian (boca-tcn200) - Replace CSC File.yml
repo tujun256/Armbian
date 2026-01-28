@@ -19,7 +19,7 @@ jobs:
       - name: Checkout your repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0  # 这里fetch-depth=0是合法的（actions/checkout的参数，非git clone）
 
       # 步骤2：调试 - 检查你仓库的csc文件是否存在
       - name: Debug - Check user CSC file
@@ -34,12 +34,17 @@ jobs:
             exit 1
           fi
 
-      # 步骤3：克隆alerice/armbian-build仓库
+      # 步骤3：克隆alerice/armbian-build仓库（修复--depth参数问题）
       - name: Clone alerice/armbian-build repository
         run: |
-          git clone --depth=0 --recursive ${{ env.ARMBIAN_REPO }} ${{ env.ARMBIAN_DIR }}
+          # 修复：去掉--depth=0，仅保留--recursive拉取子模块（完整克隆）
+          git clone --recursive ${{ env.ARMBIAN_REPO }} ${{ env.ARMBIAN_DIR }}
+          # 进入克隆后的目录，确认分支和提交信息
           cd ${{ env.ARMBIAN_DIR }}
+          echo "=== 当前分支信息 ==="
           git branch -v
+          echo "=== 最新提交信息 ==="
+          git log -1
 
       # 步骤4：核心 - 替换csc文件
       - name: Replace boca-tcn200.csc file
