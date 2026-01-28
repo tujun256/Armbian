@@ -1,577 +1,117 @@
-# Workflow Name
-name: "Armbian Build Stable 2"
-# ====================================================================
-#  TRIGGERS
-#  Defines when this workflow will run.
-# ====================================================================
-on:
-  schedule:
-    - cron: '0 0 1 * *'
-    
-  workflow_dispatch:
-    inputs:
-      BOARD:
-        type: choice
-        description: 'Board'
-        options:
-        - lemonpi
-        - boca-tcn200
-        - ufi001c
-        - uz801
-        - all
-        default: 'boca-tcn200'
-      RELEASE_CHOICE:
-        type: choice
-        description: "Which release(s) to build"
-        options:
-        - default_schedule
-        - all
-        - bookworm
-        - bullseye
-        - buster
-        - focal
-        - jammy
-        - noble
-        - oracular
-        - plucky
-        - sid
-        - trixie
-        default: 'bookworm'
-      DESKTOP:
-        type: choice
-        description: "Desktop environment"
-        options:
-        - minimal
-        - server
-        - gnome
-        - budgie
-        - cinnamon
-        - i3-wm
-        - kde-neon
-        - kde-plasma
-        - mate
-        - xfce
-        - xmonad
-        - minimal_and_server
-        default: 'minimal_and_server'
-      ENABLE_EXTENSIONS:
-        type: choice
-        description: "Armbian extension packages"
-        options: [ 'mesa-vpu', ' ' ]
-        default: "mesa-vpu"
-      DOCKER:
-        type: choice
-        description: "Build type: yes = Docker, no = Actions"
-        required: false
-        options: [ 'yes', 'no' ]
-        default: 'no'
-      
-      NIGHTLY:
-        description: "Build type: yes = Nightly, no = Stable"
-        required: false
-        options: [ 'yes', 'no' ]
-        type: choice
-        default: 'no'
-      ROOTFS:
-        type: choice
-        description: "Root filesystem"
-        options:
-        - ext4
-        - btrfs
-        default: 'ext4'
-# ====================================================================
-#  PERMISSIONS & CONCURRENCY
-# ====================================================================
-permissions:
-  contents: write
-  pages: write
-concurrency:
-  group: ${{ github.workflow }}
-  cancel-in-progress: false
-env:
-  DEFAULT_SCHEDULE_RELEASES: "bookworm"  # 强制默认发行版为bookworm
-  ALL_RELEASES: "bookworm"  # 仅保留bookworm发行版
-  BOARD: "boca-tcn200"  # 仅保留boca-tcn200主板
-# ====================================================================
-#  JOBS
-# ====================================================================
-jobs:
-  # ====================================================================
-  # JOB 0: Prepare Build Parameters and Matrix 
-  # ====================================================================
-  Prepare_Build:
-    name: "Prepare Build Parameters & Matrix"
-    runs-on: ubuntu-latest
-    outputs:
-      BOARD_STRING: ${{ (github.event_name == 'schedule' || inputs.BOARD == 'all') && env.BOARD || inputs.BOARD }}
-      DESKTOP: ${{ (github.event_name == 'schedule'|| inputs.DESKTOP == 'minimal_and_server') && '["minimal", "server"]' || format('["{0}"]', inputs.DESKTOP) }}
-      DESKTOP_DISPLAY: ${{ github.event_name == 'schedule' && 'minimal, server' || inputs.DESKTOP }}
-      ENABLE_EXTENSIONS: ${{ github.event_name == 'schedule' && ' ' || inputs.ENABLE_EXTENSIONS }}
-      NIGHTLY: ${{ github.event_name == 'schedule' && 'no' || inputs.NIGHTLY }}
-      DOCKER: ${{ github.event_name == 'schedule' && 'no' || inputs.DOCKER }}
-      ROOTFS: ${{ github.event_name == 'schedule' && 'ext4' || inputs.ROOTFS }}
-      BOARD: ${{ steps.set_matrix.outputs.BOARD }}
-      RELEASE: ${{ steps.set_matrix.outputs.RELEASE }}
-      VERSION: ${{ steps.get_version.outputs.VERSION }}
-    steps:
-      - name: Cache build dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            /var/cache/apt
-            /var/lib/apt/lists
-            ~/.ccache
-            build/cache
-          key: ${{ runner.os }}-armbian-cache-${{ hashFiles('**/custom/**/*') }}
-          restore-keys: |
-            ${{ runner.os }}-armbian-cache-
-    
-      - name: "Log effective parameters"
-        run: |
-          echo "--- Build Parameters ---"
-          echo "Trigger: ${{ github.event_name }}"
-          echo "Board: ${{ (github.event_name == 'schedule' || inputs.BOARD == 'all') && env.BOARD || inputs.BOARD }}"
-          echo "Desktop: ${{ github.event_name == 'schedule' && '[\"minimal\", \"server\"]' || format('[\"{0}\"]', inputs.DESKTOP) }}"
-          echo "NIGHTLY: ${{ github.event_name == 'schedule' && 'no' || inputs.NIGHTLY }}"
-          echo "DOCKER: ${{ github.event_name == 'schedule' && 'no' || inputs.DOCKER }}"
-          echo "ROOTFS: ${{ github.event_name == 'schedule' && 'ext4' || inputs.ROOTFS }}"
-          echo "ENABLE_EXTENSIONS: ${{ github.event_name == 'schedule' && ' ' || inputs.ENABLE_EXTENSIONS }}"
-          
-      - name: "Checkout OS Source to get Version"
-        uses: actions/checkout@v4
-        with:
-          repository: armbian/os
-          path: os
-      - name: "Get Armbian Version"
-        id: get_version
-        run: |
-          VERSION=$(jq -r '.version' os/nightly.json)
-          echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
-          echo "Armbian version for this run: ${VERSION}"
-      
-      - name: "Set and Log Release Matrix"
-        id: set_matrix
-        run: |
-          # 强制锁定：仅编译boca-tcn200 + bookworm（忽略输入和触发方式）
-          RELEASE_STRING="bookworm"
-          BOARD_STRING="boca-tcn200"
-          
-          echo "Selected releases to build: ${RELEASE_STRING}"
-          echo "Selected board to build: ${BOARD_STRING}"
-          
-          # Convert space-separated strings from env into JSON arrays for matrix strategies.
-          JSON_RELEASE=$(echo "${RELEASE_STRING}" | jq -c -R 'split(" ") | map(select(. != ""))')
-          JSON_BOARD=$(echo "${BOARD_STRING}" | jq -c -R 'split(" ") | map(select(. != ""))')
-          
-          echo "RELEASE=${JSON_RELEASE}" >> $GITHUB_OUTPUT
-          echo "BOARD=${JSON_BOARD}" >> $GITHUB_OUTPUT
-          
-          echo "--- Release Matrix Generated ---"
-          echo "Matrix_RELEASE: ${JSON_RELEASE}"
-          echo "Matrix_BOARD: ${JSON_BOARD}"
-  # ====================================================================
-  # JOB 1: Build Kernel Packages
-  # ====================================================================
-  Build_Kernel:
-    needs: Prepare_Build
-    name: "Build Kernel [${{ matrix.BOARD }} ${{ matrix.BRANCH }}]"
-    runs-on: ubuntu-22.04
-    timeout-minutes: 300
-    strategy:
-      fail-fast: false
-      matrix:
-        BRANCH: [vendor]
-        BOARD: ${{ fromJson(needs.Prepare_Build.outputs.BOARD) }}
-    steps:
-      - name: "Checkout Board Source"
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          clean: false
-          path: custom
-      - name: "Checkout Build System"
-        uses: actions/checkout@v4
-        with:
-          repository: alerice/armbian-build
-          clean: false
-          ref: main
-          path: build
-      - name: "Checkout OS Source" 
-        uses: actions/checkout@v4
-        with:
-          repository: armbian/os
-          fetch-depth: 0
-          clean: false
-          path: os
-      - name: "Setup Kernel Build Environment"
-        shell: bash
-        run: |
-          # Clean up runner to free up disk space.
-          sudo apt-get update
-          sudo -E apt-get -y purge azure-cli ghc* zulu* llvm* firefox google* dotnet* openjdk* mysql* php* mongodb* dotnet* moby* snapd* android* || true
-          sudo -E apt-get -qq autoremove --purge && sudo -E apt-get -qq clean
-          sudo dpkg --list | grep "^rc" | cut -d " " -f 3 | xargs -r sudo dpkg --purge || true
-          # Automatically sync rockchip64-6.18 patches to all existing rockchip64-6.* directories under build
-          for verdir in ./build/patch/kernel/archive/rockchip64-6.*; do
-            if [ -d "$verdir" ]; then
-              target=$(basename "$verdir")
-              if [ ! -d "./build/patch/kernel/archive/$target" ]; then
-                mkdir -p "./build/patch/kernel/archive/$target"
-              fi
-              cp -rf ./custom/Addboard/patch/kernel/archive/rockchip64-6.18/* "./build/patch/kernel/archive/$target/"
-              echo "rockchip64-6.18 patches have been synced to $target"
-            fi
-          done
-          
-          # Prepare custom build files by copying them into the build system directory.
-          mkdir -p ./build/userpatches
-          cp -rf ./custom/Addboard/* ./build
-          cp -rf ./os/userpatches/* ./build/userpatches
-      - name: "Compile Kernel [${{ matrix.BOARD }} ${{ matrix.BRANCH }}]"
-        shell: bash
-        run: |
-          cd ./build
-          # Invoke the compile script for a kernel-only build.
-          ./compile.sh \
-            REVISION="${{ needs.Prepare_Build.outputs.VERSION }}" \
-            BOARD="${{ matrix.BOARD }}" \
-            BRANCH="${{ matrix.BRANCH }}" \
-            RELEASE="bookworm" \
-            KERNEL_CONFIGURE="no" \
-            BUILD_DESKTOP="no" \
-            BUILD_MINIMAL="yes" \
-            SHARE_LOG="yes" \
-            MANAGE_ACNG="no" \
-            BETA="${{ needs.Prepare_Build.outputs.NIGHTLY }}" \
-            PREFER_DOCKER="${{ needs.Prepare_Build.outputs.DOCKER }}" \
-            EXPERT="yes" \
-            VENDOR=Armbian
-      - name: "Upload Kernel Artifact"
-        uses: actions/upload-artifact@v4
-        with:
-          name: kernel-debs-${{ matrix.BOARD }}-${{ matrix.BRANCH }}
-          path: build/output/debs/*.deb
-          if-no-files-found: error
-  # ====================================================================
-  # JOB 2: Build Armbian Image
-  # ====================================================================
-  Build_Image:
-    name: "Build Image [${{ matrix.BOARD }} ${{ matrix.BRANCH }} ${{ matrix.RELEASE }} ${{ matrix.DESKTOP }}]"
-    needs: [Prepare_Build, Build_Kernel]
-    runs-on: ubuntu-22.04
-    strategy:
-      fail-fast: false
-      matrix:
-        BRANCH: [vendor]
-        BOARD: ${{ fromJson(needs.Prepare_Build.outputs.BOARD) }} 
-        RELEASE: ${{ fromJson(needs.Prepare_Build.outputs.RELEASE) }}
-        DESKTOP: ${{ fromJson(needs.Prepare_Build.outputs.DESKTOP) }}
-        
-    steps:
-      - name: "Checkout Board Source"
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          clean: false
-          path: custom
-      - name: "Checkout Build System"
-        uses: actions/checkout@v4
-        with:
-          repository: alerice/armbian-build
-          clean: false
-          ref: main
-          path: build
-      # 3. 核心修改：用你自己的配置覆盖 armbian-build 里的默认配置
-      - name: Replace boca-tcn200.csc with custom config
-        run: |
-          # 先创建目标目录（防止目录不存在）
-          mkdir -p ./build/Addboard/config/boards/
-          # 强制覆盖：把你仓库里的配置复制到 armbian-build 对应路径
-          cp -f ./custom/Addboard/config/boards/boca-tcn200.csc ./build/Addboard/config/boards/boca-tcn200.csc
-          cp -f ./custom/Addboard/config/boards/boca-tcn200.csc ./build/config/boards/boca-tcn200.csc
+name: Build Armbian (boca-tcn200) - Replace CSC File
 
-          # 可选：验证替换是否成功（输出文件信息，方便调试）
-          echo "✅ 验证配置文件替换结果："
-          ls -l ./build/Addboard/config/boards/boca-tcn200.csc
-          cat ./build/Addboard/config/boards/boca-tcn200.csc
-          cat ./build/config/boards/boca-tcn200.csc
-          
-      - name: "Checkout OS Source"
+on:
+  workflow_dispatch:  # 仅手动触发
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      BOARD: boca-tcn200
+      ARMBIAN_REPO: https://github.com/alerice/armbian-build.git
+      ARMBIAN_DIR: ./armbian-build  # 克隆的alerice仓库目录
+      USER_CSC_FILE: ./Addboard/config/boards/boca-tcn200.csc  # 你仓库的csc文件路径
+      TARGET_CSC_FILE: ./armbian-build/build/config/boards/boca-tcn200.csc  # 目标替换路径
+
+    steps:
+      # 步骤1：检出你自己的仓库（获取需要替换的csc文件）
+      - name: Checkout your repository
         uses: actions/checkout@v4
         with:
-          repository: armbian/os
           fetch-depth: 0
-          clean: false
-          path: os
-      - name: "Download Kernel Artifact"
-        uses: actions/download-artifact@v4
-        with:
-          name: kernel-debs-${{ matrix.BOARD }}-${{ matrix.BRANCH }}
-          path: ./prebuilt-kernel-debs
-      - name: "Setup Image Build Environment"
-        shell: bash
+
+      # 步骤2：调试 - 检查你仓库的csc文件是否存在
+      - name: Debug - Check user CSC file
         run: |
-          # Clean up the runner to ensure sufficient disk space.
-          sudo apt-get update
-          sudo -E apt-get -y purge azure-cli ghc* zulu* llvm* firefox google* dotnet* openjdk* mysql* php* mongodb* dotnet* moby* snapd* android* || true
-          sudo -E apt-get -qq autoremove --purge && sudo -E apt-get -qq clean
-          sudo apt-get install -y mkbootimg android-sdk-libsparse-utils
-          
-          # Set build flags based on the desktop type for the compile script.
-          if [[ "${{ matrix.DESKTOP }}" == "minimal" ]]; then
-            echo "BUILD_DESKTOP="no"" >> $GITHUB_ENV
-            echo "BUILD_MINIMAL="yes"" >> $GITHUB_ENV
-          elif [[ "${{ matrix.DESKTOP }}" == "server" ]]; then
-            echo "BUILD_DESKTOP="no"" >> $GITHUB_ENV
-            echo "BUILD_MINIMAL="no"" >> $GITHUB_ENV
+          echo "=== 检查你仓库的csc文件 ==="
+          if [ -f "${{ env.USER_CSC_FILE }}" ]; then
+            echo "✅ 找到你的csc文件：${{ env.USER_CSC_FILE }}"
+            ls -la ${{ env.USER_CSC_FILE }}
           else
-            echo "BUILD_DESKTOP="yes"" >> $GITHUB_ENV
-            echo "BUILD_MINIMAL="no"" >> $GITHUB_ENV
-            echo "DESKTOP_ENVIRONMENT="${{ matrix.DESKTOP }}"" >> $GITHUB_ENV
-            echo "DESKTOP_APPGROUPS_SELECTED="browsers"" >> $GITHUB_ENV
-            echo "DESKTOP_ENVIRONMENT_CONFIG_NAME="config_base"" >> $GITHUB_ENV
-          fi
-          # Automatically sync rockchip64-6.18 patches to all existing rockchip64-6.* directories under build
-          for verdir in ./build/patch/kernel/archive/rockchip64-6.*; do
-            if [ -d "$verdir" ]; then
-              target=$(basename "$verdir")
-              if [ ! -d "./build/patch/kernel/archive/$target" ]; then
-                mkdir -p "./build/patch/kernel/archive/$target"
-              fi
-              cp -rf ./custom/Addboard/patch/kernel/archive/rockchip64-6.18/* "./build/patch/kernel/archive/$target/"
-              echo "rockchip64-6.18 patches have been synced to $target"
-            fi
-          done
-          
-          # Prepare build environment with userpatches and the pre-built kernel debs.
-          mkdir -p ./build/userpatches ./build/output/debs
-          cp -rf ./custom/Addboard/* ./build
-          cp -rf ./os/userpatches/* ./build/userpatches
-          cp -v ./prebuilt-kernel-debs/*.deb ./build/output/debs/
-          
-      - name: "Compile Image [${{ matrix.BOARD }} ${{ matrix.RELEASE }}]"
-        shell: bash
-        run: |
-          cd ./build
-          # Invoke compile script to build the full OS image, using the pre-built kernel.
-          ./compile.sh \
-            REVISION="${{ needs.Prepare_Build.outputs.VERSION }}" \
-            BOARD="${{ matrix.BOARD }}" \
-            BRANCH="${{ matrix.BRANCH }}" \
-            RELEASE="${{ matrix.RELEASE }}" \
-            KERNEL_CONFIGURE="no" \
-            kernel="no" \
-            BUILD_DESKTOP="${{ env.BUILD_DESKTOP }}" \
-            BUILD_MINIMAL="${{ env.BUILD_MINIMAL }}" \
-            DESKTOP_ENVIRONMENT="${{ env.DESKTOP_ENVIRONMENT }}" \
-            DESKTOP_APPGROUPS_SELECTED="${{ env.DESKTOP_APPGROUPS_SELECTED }}" \
-            DESKTOP_ENVIRONMENT_CONFIG_NAME="${{ env.DESKTOP_ENVIRONMENT_CONFIG_NAME }}" \
-            ENABLE_EXTENSIONS="${{ needs.Prepare_Build.outputs.ENABLE_EXTENSIONS }}" \
-            SHARE_LOG="yes" \
-            MANAGE_ACNG="no" \
-            BETA="${{ needs.Prepare_Build.outputs.NIGHTLY }}" \
-            PREFER_DOCKER="${{ needs.Prepare_Build.outputs.DOCKER }}" \
-            ROOTFS_TYPE="${{ needs.Prepare_Build.outputs.ROOTFS }}" \
-            NETWORKING_STACK="network-manager" \
-            EXPERT="yes" \
-            VENDOR=Armbian \
-            COMPRESS_OUTPUTIMAGE="sha,xz"  # 移除GPG压缩选项，仅保留SHA校验和XZ压缩
-      - name: "Package Flasher for UFI/UZ Devices"
-        if: contains(fromJson('["ufi001c", "uz801"]'), matrix.BOARD)
-        shell: bash
-        run: |
-          cd ./build
-          if [ -f "./extensions/package_ufi001c_flasher.sh" ]; then
-            chmod +x ./extensions/package_ufi001c_flasher.sh
-            sudo ./extensions/package_ufi001c_flasher.sh
-          else
-            echo "::error:: Flasher packaging script not found!"
+            echo "❌ 未找到你的csc文件：${{ env.USER_CSC_FILE }}"
+            echo "请确认文件路径：Addboard/config/boards/boca-tcn200.csc 是否正确"
             exit 1
           fi
-      - name: "Record Successful Image Build Info"
-        shell: bash
+
+      # 步骤3：克隆alerice/armbian-build仓库
+      - name: Clone alerice/armbian-build repository
         run: |
-          # Create a marker file to track which board/branch combinations succeeded.
-          echo "${{ matrix.BOARD }},${{ matrix.BRANCH }},${{ matrix.RELEASE }},${{ matrix.DESKTOP }}" > matrix-info.txt
-      - name: "Upload Matrix Info Artifact"
+          git clone --depth=0 --recursive ${{ env.ARMBIAN_REPO }} ${{ env.ARMBIAN_DIR }}
+          cd ${{ env.ARMBIAN_DIR }}
+          git branch -v
+
+      # 步骤4：核心 - 替换csc文件
+      - name: Replace boca-tcn200.csc file
+        run: |
+          # 先创建目标目录（避免目录不存在导致替换失败）
+          mkdir -p $(dirname ${{ env.TARGET_CSC_FILE }})
+          
+          # 备份原文件（可选，方便排查问题）
+          if [ -f "${{ env.TARGET_CSC_FILE }}" ]; then
+            cp ${{ env.TARGET_CSC_FILE }} ${{ env.TARGET_CSC_FILE }}.bak
+            echo "✅ 已备份原csc文件为：${{ env.TARGET_CSC_FILE }}.bak"
+          fi
+          
+          # 执行替换
+          cp -fv ${{ env.USER_CSC_FILE }} ${{ env.TARGET_CSC_FILE }}
+          echo "✅ 已将你的csc文件替换到：${{ env.TARGET_CSC_FILE }}"
+          
+          # 验证替换结果
+          echo "=== 验证替换后的文件 ==="
+          ls -la ${{ env.TARGET_CSC_FILE }}
+          cat ${{ env.TARGET_CSC_FILE }} | head -10  # 打印前10行确认内容
+
+      # 步骤5：安装系统依赖
+      - name: Install build dependencies
+        run: |
+          sudo apt update -y
+          sudo apt full-upgrade -y
+          sudo apt install -y \
+            git curl wget build-essential libncurses5-dev libssl-dev \
+            bc flex bison kmod cpio rsync unzip zip qemu-user-static \
+            python3 python3-pip python3-setuptools parted dosfstools \
+            uuid-runtime grub-efi-amd64-bin grub-pc-bin mtools \
+            libelf-dev libssl-dev dwarves zstd device-tree-compiler
+
+      # 步骤6：初始化编译环境
+      - name: Initialize build environment
+        run: |
+          cd ${{ env.ARMBIAN_DIR }}
+          if [ -f "build.sh" ]; then
+            chmod +x build.sh
+            ./build.sh --help
+          fi
+          if [ -f "compile.sh" ]; then
+            chmod +x compile.sh
+          elif [ -f "build.sh" ]; then
+            ln -s build.sh compile.sh
+          else
+            echo "错误：未找到编译脚本！"
+            exit 1
+          fi
+
+      # 步骤7：执行编译
+      - name: Build Armbian image
+        run: |
+          cd ${{ env.ARMBIAN_DIR }}
+          ./compile.sh \
+            BOARD=${{ env.BOARD }} \
+            BRANCH=current \
+            BUILD_MINIMAL=yes \
+            BUILD_DESKTOP=no \
+            KERNEL_ONLY=no \
+            KERNEL_CONFIGURE=no
+
+      # 步骤8：上传产物和日志
+      - name: Upload build results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: matrix-info-${{ matrix.BOARD }}-${{ matrix.BRANCH }}-${{ matrix.RELEASE }}-${{ matrix.DESKTOP }}
-          path: matrix-info.txt
-      - name: "Upload Image to GitHub Release"
-        uses: ncipollo/release-action@v1
-        if: success()
-        with:
-          tag: "Armbian_V${{ needs.Prepare_Build.outputs.VERSION }}"
-          name: "Armbian_V${{ needs.Prepare_Build.outputs.VERSION }}"
-          artifacts: |
-            build/output/images/*
-          allowUpdates: true
-          removeArtifacts: false
-          replacesArtifacts: false 
-          token: ${{ secrets.GITHUB_TOKEN }}
-  # ====================================================================
-  # JOB 3: Publish GitHub Release
-  # ====================================================================
-  Publish_Release:
-    name: "Publish GitHub Release"
-    runs-on: ubuntu-latest
-    needs: [Prepare_Build, Build_Image]
-    if: always() 
-    steps:
-      - name: "Download All Artifacts"
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts/
-      - name: "Rename Kernel DEBs for Release"
-        shell: bash
-        run: |
-          # Simplify kernel .deb filenames for a cleaner release page.
-          set -eo pipefail
-          echo "--- Simplifying linux-*.deb filenames for release ---"
-          find artifacts/kernel-debs-*/ -type f -name 'linux-*.deb' | while read -r filepath; do
-            dir=$(dirname "$filepath"); old_name=$(basename "$filepath")
-            new_name=$(echo "$old_name" | sed -E 's/^(.*__[0-9.]+).*\.deb$/\1.deb/')
-            if [[ "$old_name" != "$new_name" ]]; then mv -v "$filepath" "$dir/$new_name"; fi
-          done
-          echo "--- Final list of kernel packages after simplification ---"
-          ls -R artifacts/kernel-debs-*/
-          
-      - name: "Generate Release Body"
-        id: generate_body
-        shell: bash
-        run: |
-          # This clever logic finds all the unique boards and branches that were successfully built
-          BUILT_BOARDS=$(find artifacts/matrix-info* -name "*.txt" -print0 | xargs -0 cat | cut -d',' -f1 | sort -u | paste -sd ", " -)
-          BUILT_BRANCHES=$(find artifacts/matrix-info* -name "*.txt" -print0 | xargs -0 cat | cut -d',' -f2 | sort -u | paste -sd ", " -)
-          BUILT_RELEASES=$(find artifacts/matrix-info* -name "*.txt" -print0 | xargs -0 cat | cut -d',' -f3 | sort -u | paste -sd ", " -)
-          BUILT_DESKTOPS=$(find artifacts/matrix-info* -name "*.txt" -print0 | xargs -0 cat | cut -d',' -f4 | sort -u | paste -sd ", " -)
-          echo "
-            <p align='center'>
-            <a href='https://www.armbian.com'>
-            <img src='https://raw.githubusercontent.com/armbian/.github/master/profile/tux-two.png' width='400'></a></p>
-            <h1 align=center>Armbian OS</h1>
-            <p align=center>
-            <a href='https://www.armbian.com'><img alt='Armbian Linux stable' src='https://img.shields.io/badge/dynamic/json?label=Armbian%20Linux%20current&query=CURRENT&color=f71000&cacheSeconds=600&style=for-the-badge&url=https%3A%2F%2Fgithub.com%2Farmbian%2Fscripts%2Freleases%2Fdownload%2Fstatus%2Frunners_capacity.json'></a>
-            <a href='https://www.armbian.com'><img alt='Armbian Linux rolling' src='https://img.shields.io/badge/dynamic/json?label=Armbian%20Linux%20edge&query=EDGE&color=34be5b&cacheSeconds=600&style=for-the-badge&url=https%3A%2F%2Fgithub.com%2Farmbian%2Fscripts%2Freleases%2Fdownload%2Fstatus%2Frunners_capacity.json'></a>
-            </p>
-            <br>
-            
-            - **Board**: ${BUILT_BOARDS}
-            - **Kernel**: ${BUILT_BRANCHES}
-            - **Desktop**: ${BUILT_DESKTOPS} 
-            - **Releases**: ${BUILT_RELEASES}
-            - **Build Type**: ${{ needs.Prepare_Build.outputs.NIGHTLY == 'yes' && 'Nightly' || 'Stable' }}
-            - **Verification**: sha256sum  # 移除GPG签名描述
-            <br>
-            Please note that Armbian Rolling Releases are not recommended for production environments, as these builds are not thoroughly tested. However, in most cases, they should work well. 
-            
-            <br>
-             
-            </p>" > body.html
-      - name: "Publish Final Release and Kernel Packages"
-        uses: ncipollo/release-action@v1
-        if: success()
-        with:
-          tag: "Armbian_V${{ needs.Prepare_Build.outputs.VERSION }}"
-          name: "Armbian_V${{ needs.Prepare_Build.outputs.VERSION }}"
-          artifacts: |
-            artifacts/kernel-debs-*/linux-*.deb
-          allowUpdates: true
-          removeArtifacts: false
-          replacesArtifacts: false 
-          token: ${{ secrets.GITHUB_TOKEN }}
-          bodyFile: "body.html"
-  # ====================================================================
-  # JOB 4: Update APT Repository
-  # ====================================================================
-  Update_APT_Repo:
-    name: "Update APT Repository"
-    runs-on: ubuntu-latest
-    needs: [Publish_Release]
-    if: success()
-    # 已移除GPG_KEY_ID环境变量
-    steps:
-      - name: "Download all kernel DEB packages"
-        uses: actions/download-artifact@v4
-        with:
-          pattern: kernel-debs-*
-          path: artifacts/debs
-      - name: "Download MonitorPanel DEB fpackages"
-        uses: dsaltares/fetch-gh-release-asset@1.1.0
-        continue-on-error: true
-        with:
-          repo: 'YANXIAOXIH/MonitorPanel'
-          version: 'latest'    
-          file: 'monitorpanel-.*_arm64.deb'
-          target: 'artifacts/debs/monitorpanel/monitorpanel.deb' 
-      - name: "Install APT repository tools"
-        run: sudo apt-get update && sudo apt-get install -y reprepro
-      - name: "Setup APT Repository Structure"
-        shell: bash
-        run: |
-          # Dynamically create the 'distributions' config file for reprepro.
-          mkdir -p repo/conf
-          > repo/conf/distributions
-          
-          # The repo components are derived from the kernel artifact names (e.g., lemonpi-edge).
-          COMPONENTS="main"
-          for dir in artifacts/debs/kernel-debs-*/; do
-            variant=$(basename "$dir" | sed 's/kernel-debs-//')
-            COMPONENTS="${COMPONENTS} ${variant}"
-          done
-          
-          for codename in $RELEASE; do
-            echo "Generating config for $codename with components:${COMPONENTS}"
-            cat <<EOF >> repo/conf/distributions
-          Origin: Armbian
-          Label: Armbian
-          Codename: ${codename}
-          Architectures: arm64
-          Components: ${COMPONENTS}
-          Description: Custom APT repository for Armbian
-          # 已移除SignWith GPG签名配置
-          EOF
-          done
-          echo "--- APT distributions config ---"
-          cat repo/conf/distributions
-      - name: "Add all DEB packages to repository"
-        shell: bash
-        run: |
-          # Use reprepro to add all built .deb packages to the repository.
-          for deb_dir in artifacts/debs/kernel-debs-*/; do
-            component=$(basename "$deb_dir" | sed 's/kernel-debs-//')
-            echo "--- Processing packages from ${deb_dir} for component: ${component} ---"
-            for codename in $RELEASE; do
-              echo "Adding packages to distribution '${codename}' component '${component}'"
-              reprepro -b repo/ -V --ignore=wrongdistribution -C ${component} includedeb ${codename} ${deb_dir}/*.deb
-              if [ $? -ne 0 ]; then
-                  echo "::error::reprepro failed for ${codename}/${component} with packages from ${deb_dir}"
-                  exit 1
-              fi
-            done
-          done
-      - name: "Add MonitorPanel DEB package to 'main' component"
-        shell: bash
-        run: |
-          MONITOR_DEB_FILE="artifacts/debs/monitorpanel/monitorpanel.deb"
-          if [ -s "$MONITOR_DEB_FILE" ]; then
-            echo "--- Processing MonitorPanel package ---"
-            for codename in $RELEASE; do
-              echo "Adding MonitorPanel to distribution '${codename}' component 'main'"
-              reprepro -b repo/ -V -C main includedeb ${codename} "$MONITOR_DEB_FILE"
-              if [ $? -ne 0 ]; then
-                  echo "::error::reprepro failed for ${codename}/main with MonitorPanel package"
-                  exit 1
-              fi
-            done
-          else
-            echo "::warning::MonitorPanel DEB package not found or empty, skipping."
-          fi
-      - name: "Deploy repository to GitHub Pages"
-        uses: peaceiris/actions-gh-pages@v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./repo
-          publish_branch: apt-repo
-          force_orphan: true
+          name: armbian-boca-tcn200-results
+          path: |
+            ${{ env.ARMBIAN_DIR }}/output/images/*.img*
+            ${{ env.ARMBIAN_DIR }}/output/images/*.zip*
+            ${{ env.ARMBIAN_DIR }}/compile.log
+            ${{ env.TARGET_CSC_FILE }}.bak  # 可选：上传备份的原csc文件
+          retention-days: 7
