@@ -78,18 +78,22 @@ jobs:
             exit 1
           fi
 
-      # 核心修复：移除废弃的KERNEL_ONLY/KERNEL_CONFIGURE参数
+      # 核心修复：添加SKIP_CONFIGURE/CONFIGURE参数，彻底禁用内核配置交互
       - name: Build Armbian image
         run: |
           cd ${{ env.ARMBIAN_DIR }}
-          # 修复点：移除KERNEL_ONLY=no和KERNEL_CONFIGURE=no（新版本废弃）
-          # 仅保留编译完整镜像所需的核心参数
+          # 新增参数：
+          # 1. SKIP_CONFIGURE=yes：强制跳过内核配置的交互式选择
+          # 2. CONFIGURE=no：兼容旧版本，确保不弹出内核配置菜单
+          # 3. 保留NONINTERACTIVE=yes，双重保障禁用所有交互
           ./compile.sh \
             BOARD=${{ env.BOARD }} \
             BRANCH=legacy \
-            RELEASE=bookworm \
+            RELEASE=jammy \
             FORCE_BOARD_FALLBACK=yes \
             NONINTERACTIVE=yes \
+            SKIP_CONFIGURE=yes \
+            CONFIGURE=no \
             BUILD_MINIMAL=yes \
             BUILD_DESKTOP=no
 
