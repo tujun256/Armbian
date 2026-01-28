@@ -38,7 +38,7 @@ jobs:
           echo "=== 当前分支信息 ==="
           git branch -v
           echo "=== 查看boca-tcn200支持的内核分支 ==="
-          grep -i "KERNEL_TARGET" ${{ env.TARGET_CSC_FILE }} || echo "未找到KERNEL_TARGET配置"
+          grep -i "KERNEL_TARGET" config/boards/boca-tcn200.csc || echo "未找到KERNEL_TARGET配置"
 
       - name: Replace boca-tcn200.csc file
         run: |
