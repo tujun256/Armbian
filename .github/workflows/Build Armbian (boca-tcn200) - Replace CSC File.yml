@@ -12,7 +12,7 @@ jobs:
       ARMBIAN_REPO: https://github.com/alerice/armbian-build.git
       ARMBIAN_DIR: ./armbian-build
       USER_CSC_FILE: ./Addboard/config/boards/boca-tcn200.csc
-      TARGET_CSC_FILE: ./armbian-build/config/boards/boca-tcn200.csc
+      TARGET_CSC_FILE: ./armbian-build/build/config/boards/boca-tcn200.csc
 
     steps:
       - name: Checkout your repository
@@ -78,13 +78,12 @@ jobs:
             exit 1
           fi
 
-      # 核心修复：移除所有行尾注释，简化参数格式，避免未知参数错误
+      # 核心修复：移除废弃的KERNEL_ONLY/KERNEL_CONFIGURE参数
       - name: Build Armbian image
         run: |
           cd ${{ env.ARMBIAN_DIR }}
-          # 修复点1：移除所有行尾注释，确保参数仅包含键值对
-          # 修复点2：参数行末尾仅保留\，无多余空格/注释
-          # 修复点3：确保无空参数、无多余空格
+          # 修复点：移除KERNEL_ONLY=no和KERNEL_CONFIGURE=no（新版本废弃）
+          # 仅保留编译完整镜像所需的核心参数
           ./compile.sh \
             BOARD=${{ env.BOARD }} \
             BRANCH=legacy \
@@ -92,9 +91,7 @@ jobs:
             FORCE_BOARD_FALLBACK=yes \
             NONINTERACTIVE=yes \
             BUILD_MINIMAL=yes \
-            BUILD_DESKTOP=no \
-            KERNEL_ONLY=no \
-            KERNEL_CONFIGURE=no
+            BUILD_DESKTOP=no
 
       - name: Upload build results
         if: always()
