@@ -21,8 +21,8 @@ jobs:
       ARMBIAN_DIR: ./armbian-build
       USER_CSC_FILE: ./Addboard/config/boards/boca-tcn200.csc
       TARGET_CSC_FILE: ./armbian-build/build/config/boards/boca-tcn200.csc
-      # 【新增】定义output目录完整路径，方便后续引用
-      OUTPUT_DIR: ${{ env.ARMBIAN_DIR }}/output
+      # 【修正】不再嵌套引用env.ARMBIAN_DIR，直接写死完整路径（与ARMBIAN_DIR保持一致）
+      OUTPUT_DIR: ./armbian-build/output
 
     steps:
       - name: Checkout your repository
@@ -99,7 +99,7 @@ jobs:
         with:
           name: armbian-boca-tcn200-results
           path: |
-            ${{ env.OUTPUT_DIR }}/**  # 【优化】匹配整个output目录，与后续Release上传保持一致
+            ${{ env.OUTPUT_DIR }}/**  # 【此处可正常引用env.OUTPUT_DIR，因为是在步骤内】
             ${{ env.ARMBIAN_DIR }}/compile.log
             ${{ env.TARGET_CSC_FILE }}.bak
           retention-days: 7
