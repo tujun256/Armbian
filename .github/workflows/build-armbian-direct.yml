@@ -6,7 +6,7 @@ on:
       release_version:
         description: '固件版本号（如v1.0.0）'
         required: true
-        default: 'v1.0.0'
+        default: 'v1.0.1'
       release_name:
         description: 'Release名称（如boca-tcn200-legacy-jammy-v1.0.0）'
         required: true
@@ -92,7 +92,7 @@ jobs:
           cd ${{ env.ARMBIAN_DIR }}
           ./compile.sh \
             BOARD=${{ env.BOARD }} \
-            BRANCH=legacy \
+            BRANCH=vendor \
             RELEASE=jammy \
             BUILD_MINIMAL=yes \
             BUILD_DESKTOP=no \
