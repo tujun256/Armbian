@@ -1,7 +1,14 @@
-name: Build Armbian (boca-tcn200) - Replace CSC File
-
 on:
   workflow_dispatch:  # 仅手动触发
+    inputs:  # 【保留】手动触发时可指定版本号，避免Release标签重复
+      release_version:
+        description: '固件版本号（如v1.0.0）'
+        required: true
+        default: 'v1.0.1'
+      release_name:
+        description: 'Release名称（如boca-tcn200-legacy-jammy-v1.0.0）'
+        required: true
+        default: 'boca-tcn200-legacy-jammy-v1.0.0'
 
 jobs:
   build:
@@ -13,6 +20,8 @@ jobs:
       ARMBIAN_DIR: ./armbian-build
       USER_CSC_FILE: ./Addboard/config/boards/boca-tcn200.csc
       TARGET_CSC_FILE: ./armbian-build/build/config/boards/boca-tcn200.csc
+      # 【新增】定义output目录完整路径，方便后续引用
+      OUTPUT_DIR: ${{ env.ARMBIAN_DIR }}/output
 
     steps:
       - name: Checkout your repository
@@ -30,7 +39,6 @@ jobs:
             echo "❌ 未找到你的csc文件：${{ env.USER_CSC_FILE }}"
             exit 1
           fi
-
       - name: Clone alerice/armbian-build repository
         run: |
           git clone --recursive ${{ env.ARMBIAN_REPO }} ${{ env.ARMBIAN_DIR }}
@@ -39,7 +47,6 @@ jobs:
           git branch -v
           echo "=== 查看boca-tcn200支持的内核分支 ==="
           grep -i "KERNEL_TARGET" config/boards/boca-tcn200.csc || echo "未找到KERNEL_TARGET配置"
-
       - name: Replace boca-tcn200.csc file
         run: |
           mkdir -p $(dirname ${{ env.TARGET_CSC_FILE }})
@@ -50,7 +57,6 @@ jobs:
           cp -fv ${{ env.USER_CSC_FILE }} ${{ env.TARGET_CSC_FILE }}
           echo "✅ 已替换csc文件"
           grep -i "KERNEL_TARGET" ${{ env.TARGET_CSC_FILE }}
-
       - name: Install build dependencies
         run: |
           sudo apt update -y
@@ -61,7 +67,6 @@ jobs:
             python3 python3-pip python3-setuptools parted dosfstools \
             uuid-runtime grub-efi-amd64-bin grub-pc-bin mtools \
             libelf-dev libssl-dev dwarves zstd device-tree-compiler
-
       - name: Initialize build environment
         run: |
           cd ${{ env.ARMBIAN_DIR }}
@@ -77,31 +82,48 @@ jobs:
             echo "错误：未找到编译脚本！"
             exit 1
           fi
-
-      # 核心修复：添加SKIP_CONFIGURE/CONFIGURE参数，彻底禁用内核配置交互
       - name: Build Armbian image
         run: |
           cd ${{ env.ARMBIAN_DIR }}
-          # 新增参数：
-          # 1. SKIP_CONFIGURE=yes：强制跳过内核配置的交互式选择
-          # 2. CONFIGURE=no：兼容旧版本，确保不弹出内核配置菜单
-          # 3. 保留NONINTERACTIVE=yes，双重保障禁用所有交互
           ./compile.sh \
             BOARD=${{ env.BOARD }} \
-            BRANCH=legacy \
+            BRANCH=vendor \
             RELEASE=jammy \
             BUILD_MINIMAL=yes \
             BUILD_DESKTOP=no \
             KERNEL_CONFIGURE=no
-
-      - name: Upload build results
+      - name: Upload build results (artifact)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: armbian-boca-tcn200-results
           path: |
-            ${{ env.ARMBIAN_DIR }}/output/images/*.img*
-            ${{ env.ARMBIAN_DIR }}/output/images/*.zip*
+            ${{ env.OUTPUT_DIR }}/**  # 【优化】匹配整个output目录，与后续Release上传保持一致
             ${{ env.ARMBIAN_DIR }}/compile.log
             ${{ env.TARGET_CSC_FILE }}.bak
           retention-days: 7
+
+      # ====================== 【修改核心】Release自动发布（上传整个output目录） ======================
+      - name: Debug - Check output directory content
+        run: |
+          echo "=== 查看整个output目录的内容 ==="
+          if [ -d "${{ env.OUTPUT_DIR }}" ]; then
+            echo "✅ 找到output目录：${{ env.OUTPUT_DIR }}"
+            ls -laR ${{ env.OUTPUT_DIR }}  # 递归列出所有文件和文件夹，方便排错
+          else
+            echo "❌ 未找到output目录：${{ env.OUTPUT_DIR }}"
+            exit 1
+          fi
+
+      - name: Create Release and Upload Entire Output Directory
+        uses: softprops/action-gh-release@v1  # 替代废弃的actions/create-release，支持直接上传目录
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.event.inputs.release_version }}  # 标签名=手动输入的版本号
+          name: ${{ github.event.inputs.release_name }}  # Release名称=手动输入的名称（满足你release:name的需求）
+          draft: false  # 非草稿，直接发布
+          prerelease: false  # 非预发布
+          overwrite: true  # 覆盖同名标签的现有Release和资产
+          files: ${{ env.OUTPUT_DIR }}/**  # 【核心修改】匹配output目录下所有文件/文件夹（递归）
+          fail_on_unmatched_files: false  # 允许目录为空（避免编译失败时上传步骤直接报错）
