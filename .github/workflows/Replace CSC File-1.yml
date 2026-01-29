@@ -1,3 +1,4 @@
+name: Build Armbian (boca-tcn200) - Replace CSC File
 on:
   workflow_dispatch:  # 仅手动触发
     inputs:  # 【保留】手动触发时可指定版本号，避免Release标签重复
