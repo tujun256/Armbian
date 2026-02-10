@@ -18,26 +18,48 @@ on:
       build_desktop:
         description: 'Build desktop image'
         required: true
-        default: 'no'
+        default: 'server'
         type: choice
         options:
-          - 'no'
-          - 'yes'
+          - 'server'
+          - 'desktop'
           - 'minimal'
 
 env:
-  # 编译配置
   BOARD: ${{ github.event.inputs.board || 'orangepi5' }}
   RELEASE: ${{ github.event.inputs.release || 'bookworm' }}
-  BUILD_DESKTOP: ${{ github.event.inputs.build_desktop || 'no' }}
+  BUILD_DESKTOP: ${{ github.event.inputs.build_desktop || 'server' }}
 
 jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: alerice/armbian-build
+          fetch-depth: 0
+          submodules: recursive
+      
+      - name: Get supported branches
+        id: set-matrix
+        run: |
+          # 定义要编译的分支
+          # 对于 orangepi5: edge, current, vendor
+          # 如果需要特定分支，可以修改这里
+          MATRIX='{"branch":["current","vendor"]}'
+          echo "matrix=${MATRIX}" >> $GITHUB_OUTPUT
+          echo "Build matrix: ${MATRIX}"
+
   build:
+    needs: prepare
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
-      matrix:
-        branch: [legacy, vendor]
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
     
     steps:
       - name: Maximize build space
@@ -63,81 +85,83 @@ jobs:
       
       - name: Prepare build environment
         run: |
-          # 设置 git 配置
           git config --global user.email "builder@armbian.com"
           git config --global user.name "Armbian Builder"
           
-          # 创建必要目录
           mkdir -p output/images
-          mkdir -p output/debs
+          mkdir -p output/logs
           mkdir -p userpatches
+          
+          # 创建自动应答配置，避免交互式 dialog
+          cat > userpatches/config-default.conf << 'EOF'
+          # 非交互模式设置
+          NO_HOST_RELEASE="yes"
+          EOF
       
       - name: Build Armbian (${{ matrix.branch }})
         run: |
-          # 设置编译参数
-          BUILD_OPT="minimal"
-          if [ "${BUILD_DESKTOP}" = "yes" ]; then
-            BUILD_OPT="desktop"
-          elif [ "${BUILD_DESKTOP}" = "no" ]; then
-            BUILD_OPT="cli"
-          fi
+          # 设置构建类型
+          BUILD_OPT=""
+          case "${BUILD_DESKTOP}" in
+            "server")
+              BUILD_OPT="server"
+              ;;
+            "desktop")
+              BUILD_OPT="desktop"
+              ;;
+            "minimal")
+              BUILD_OPT="minimal"
+              ;;
+            *)
+              BUILD_OPT="server"
+              ;;
+          esac
           
           echo "=========================================="
-          echo "Building Armbian for:"
+          echo "Building Armbian:"
           echo "  Board: ${BOARD}"
           echo "  Branch: ${{ matrix.branch }}"
           echo "  Release: ${RELEASE}"
           echo "  Type: ${BUILD_OPT}"
           echo "=========================================="
           
-          # 执行编译
+          # 使用新的 CLI 命令格式构建完整镜像
+          # EXPERT=yes 允许使用非交互模式
           ./compile.sh \
             BOARD="${BOARD}" \
             BRANCH="${{ matrix.branch }}" \
             RELEASE="${RELEASE}" \
-            BUILD_MINIMAL="${BUILD_OPT}" \
-            BUILD_DESKTOP="${BUILD_DESKTOP}" \
-            KERNEL_CONFIGURE="no" \
-            KERNEL_ONLY="no" \
-            COMPRESS_OUTPUTIMAGE="sha,gpg,xz" \
+            BUILD_OPT="${BUILD_OPT}" \
             EXPERT="yes" \
+            COMPRESS_OUTPUTIMAGE="sha,xz" \
             NO_HOST_RELEASE="yes" \
-            ALLOW_ROOT="yes" \
-            INSTALL_KSRC="no" || true
-          
-          # 如果上面的命令失败，尝试简化参数
-          if [ ! "$(ls -A output/images/*.img* 2>/dev/null)" ]; then
-            echo "Retrying with minimal parameters..."
-            ./compile.sh \
-              BOARD="${BOARD}" \
-              BRANCH="${{ matrix.branch }}" \
-              RELEASE="${RELEASE}" \
-              BUILD_OPT="${BUILD_OPT}" \
-              KERNEL_CONFIGURE="no" || true
-          fi
+            ALLOW_ROOT="yes"
       
       - name: List output files
         run: |
           echo "=== Output Images ==="
           ls -lah output/images/ 2>/dev/null || echo "No images found"
           echo ""
-          echo "=== Output Directory Structure ==="
+          echo "=== Output Logs ==="
+          ls -lah output/logs/ 2>/dev/null || echo "No logs found"
+          echo ""
+          echo "=== All Output Files ==="
           find output -type f -exec ls -lh {} \; 2>/dev/null || echo "No output files"
       
       - name: Prepare artifacts
         run: |
-          # 创建临时目录存放产物
           ARTIFACT_DIR="release_${{ matrix.branch }}"
           mkdir -p "${ARTIFACT_DIR}"
           
-          # 复制所有编译产物
+          # 复制镜像文件
           if [ -d "output/images" ]; then
-            cp -v output/images/* "${ARTIFACT_DIR}/" 2>/dev/null || true
+            find output/images -type f \( -name "*.img*" -o -name "*.sha" -o -name "*.asc" \) \
+              -exec cp -v {} "${ARTIFACT_DIR}/" \; 2>/dev/null || true
           fi
           
-          # 复制日志文件
+          # 复制日志
           if [ -d "output/logs" ]; then
-            cp -rv output/logs "${ARTIFACT_DIR}/" 2>/dev/null || true
+            cp -rv output/logs/* "${ARTIFACT_DIR}/" 2>/dev/null || true
           fi
           
           # 生成构建信息
@@ -151,10 +175,18 @@ jobs:
           Desktop: ${BUILD_DESKTOP}
           Commit: ${{ github.sha }}
           Workflow Run: ${{ github.run_number }}
+          Repository: ${{ github.repository }}
           EOF
           
-          echo "=== Artifacts to upload ==="
-          ls -lah "${ARTIFACT_DIR}/"
+          echo "=== Artifacts ==="
+          ls -lah "${ARTIFACT_DIR}/" || echo "No artifacts"
+          
+          # 检查是否有文件
+          if [ -z "$(ls -A ${ARTIFACT_DIR} 2>/dev/null)" ]; then
+            echo "Warning: No artifacts generated!"
+            # 创建一个占位文件
+            echo "Build failed or no output" > "${ARTIFACT_DIR}/build_status.txt"
+          fi
       
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -167,35 +199,48 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+    if: always() && needs.build.result == 'success'
     
     steps:
-      - name: Download legacy artifacts
+      - name: Download current artifacts
         uses: actions/download-artifact@v4
         with:
-          name: armbian-legacy-${{ github.run_number }}
-          path: release/legacy
+          name: armbian-current-${{ github.run_number }}
+          path: release/current
+        continue-on-error: true
       
       - name: Download vendor artifacts
         uses: actions/download-artifact@v4
         with:
           name: armbian-vendor-${{ github.run_number }}
           path: release/vendor
+        continue-on-error: true
       
       - name: List all release files
         run: |
           echo "=== All Release Files ==="
-          find release -type f -exec ls -lh {} \;
+          find release -type f -exec ls -lh {} \; 2>/dev/null || echo "No files"
+      
+      - name: Check artifacts exist
+        id: check
+        run: |
+          if [ -d "release" ] && [ "$(find release -type f | wc -l)" -gt 0 ]; then
+            echo "has_files=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_files=false" >> $GITHUB_OUTPUT
+            echo "No artifacts found, skipping release"
+          fi
       
       - name: Generate release tag
+        if: steps.check.outputs.has_files == 'true'
         id: tag
         run: |
-          # 生成版本标签
           TAG="v$(date -u +"%Y%m%d")-${{ github.run_number }}"
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
           echo "Generated tag: ${TAG}"
       
       - name: Create Release
+        if: steps.check.outputs.has_files == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
@@ -204,36 +249,37 @@ jobs:
             ## Armbian 固件构建
             
             **构建信息:**
-            - 📅 构建日期: ${{ github.event.head_commit.timestamp || 'N/A' }}
-            - 🖥️ 目标板: `${{ github.event.inputs.board || 'orangepi5' }}`
-            - 🐧 发行版: `${{ github.event.inputs.release || 'bookworm' }}`
-            - 🖼️ 桌面环境: `${{ github.event.inputs.build_desktop || 'no' }}`
+            - 📅 构建日期: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+            - 🖥️ 目标板: \`${{ github.event.inputs.board || 'orangepi5' }}\`
+            - 🐧 发行版: \`${{ github.event.inputs.release || 'bookworm' }}\`
+            - 🖼️ 构建类型: \`${{ github.event.inputs.build_desktop || 'server' }}\`
             
             **内核分支:**
-            - 📦 **Legacy** - 传统内核版本
-            - 📦 **Vendor** - 厂商内核版本
+            - 📦 **current** - 稳定的主线内核
+            - 📦 **vendor** - 厂商提供的内核
             
             **文件说明:**
             - `.img.xz` - 压缩的固件镜像文件
             - `.sha` - SHA256 校验和文件
-            - `.asc` - GPG 签名文件
             - `build_info.txt` - 构建信息
             
             > ⚠️ 请下载对应内核版本的固件并校验完整性后使用
           files: |
-            release/**/*
+            release/current/*
+            release/vendor/*
           draft: false
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       
       - name: Release Summary
+        if: steps.check.outputs.has_files == 'true'
         run: |
           echo "## ✅ Release Created Successfully!" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Tag:** \`${{ steps.tag.outputs.tag }}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Released Files:" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          find release -type f >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          find release -type f 2>/dev/null >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
