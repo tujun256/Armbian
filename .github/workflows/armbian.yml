@@ -228,7 +228,8 @@ jobs:
 - SATA 热插拔需手动重新扫描：`echo "- - -" > /sys/class/scsi_host/host*/scan`
 - 原厂 Android 分区表需完全覆盖（首次刷机建议全盘擦除）
 
-
+## 技术支持
+- 恩山无线论坛：搜索 "Boca TCN200 Armbian"
 - 本固件基于 commit: 1ca0b6f5db966dbe6c038736a95076ed78b2a10a
 EOF
 
