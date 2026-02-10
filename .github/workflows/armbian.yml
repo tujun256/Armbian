@@ -1,4 +1,3 @@
-# .github/workflows/armbian.yml
 name: Build Boca TCN200 Firmware
 
 on:
