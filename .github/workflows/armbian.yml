@@ -1,113 +1,73 @@
-# .github/workflows/armbian.yml
-name: Armbian Build
+name: Build Armbian TCN200
 
+# 在创建 tag 时触发此工作流
 on:
-  workflow_dispatch:
-    inputs:
-      board:
-        description: 'Target board name (e.g., nas-lite)'
-        required: true
-        default: 'nas-lite'
-      release:
-        description: 'Distribution release (bookworm/jammy)'
-        required: true
-        default: 'bookworm'
-      desktop:
-        description: 'Build with desktop environment'
-        required: false
-        default: 'no'
-        type: boolean
+  push:
+    tags:
+      - 'v*' # 推送标签时触发，例如 v1.0, v2.0 等
 
 jobs:
   build:
+    runs-on: ubuntu-latest
     strategy:
+      # 定义矩阵，为每种桌面环境运行一次构建步骤
       matrix:
         branch: [legacy, vendor]
-      fail-fast: false
-
-    runs-on: ubuntu-22.04
-    env:
-      BOARD: ${{ github.event.inputs.board }}
-      BRANCH: ${{ matrix.branch }}
-      RELEASE: ${{ github.event.inputs.release }}
-      BUILD_DESKTOP: ${{ github.event.inputs.desktop == 'true' && 'yes' || 'no' }}
-
+    
     steps:
-      - name: Check disk space
-        run: |
-          df -h / | tail -1
-          free -h | grep Mem
+    - name: Checkout repository
+      uses: actions/checkout@v3
 
-      - name: Checkout armbian-build
-        uses: actions/checkout@v4
-        with:
-          repository: alerice/armbian-build
-          path: armbian-build
-          submodules: recursive
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
 
-      - name: Install dependencies
-        working-directory: armbian-build
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bc bison build-essential ccache debootstrap flex gawk gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf git libc6-dev-armhf-cross libc6-dev-arm64-cross libncurses5-dev libssl-dev lsb-release lzop python3 python3-dev python3-pip python3-setuptools qemu-user-static u-boot-tools xz-utils wget zip unzip rsync parted dosfstools btrfs-progs curl pigz pv dialog whiptail ca-certificates
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y debootstrap lvm2 kmod \
+          dosfstools e2fsprogs parted binfmt-support qemu-user-static
 
-      - name: Build Armbian
-        working-directory: armbian-build
-        run: |
-          ./compile.sh BOARD="${BOARD}" BRANCH="${BRANCH}" RELEASE="${RELEASE}" BUILD_DESKTOP="${BUILD_DESKTOP}" BUILD_MINIMAL=no KERNEL_CONFIGURE=no CLEAN_LEVEL="make,debs,images" BUILD_THREADS="$(nproc)" PROGRESS_LOG_TO_FILE=yes 2>&1 | tee build.log || { tail -n 200 build.log; exit 1; }
-          echo "Build completed successfully"
+    - name: Clone armbian-build repository
+      # 我们使用一个已知的、稳定的 v24.8.1-trunk 版本，而不是 master 分支
+      # 以确保构建的可重复性和稳定性
+      run: |
+        git clone --depth 1 --branch v24.8.1-trunk https://github.com/alerice/armbian-build.git
 
-      - name: Package artifacts
-        working-directory: armbian-build
-        run: |
-          TIMESTAMP=$(date +%Y%m%d)
-          OUTPUT_DIR="armbian-${BOARD}-${BRANCH}-${RELEASE}-${TIMESTAMP}"
-          mkdir -p "${OUTPUT_DIR}"
-          cp -r output/. "${OUTPUT_DIR}/" 2>/dev/null || true
-          cat > "${OUTPUT_DIR}/BUILD_INFO.txt" << EOF
-Board: ${BOARD}
-Kernel Branch: ${BRANCH}
-Release: ${RELEASE}
-Desktop: ${BUILD_DESKTOP}
-Build Date: $(date)
-Workflow Run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
-EOF
-          cp build.log "${OUTPUT_DIR}/" 2>/dev/null || true
-          tar -czf "${OUTPUT_DIR}.tar.gz" "${OUTPUT_DIR}"
-          sha256sum "${OUTPUT_DIR}.tar.gz" > "${OUTPUT_DIR}.sha256"
+    - name: Prepare for build
+      working-directory: ./armbian-build
+      run: |
+        # 创建一个配置文件来指定构建选项，避免交互式输入
+        cat <<EOF > userpatches/config-default.conf
+        BOARD=boca-tcn200
+        BRANCH=${{ matrix.branch }}
+        BUILD_DESKTOP=yes
+        EOF
+        echo "Build configuration created."
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: armbian-${{ matrix.branch }}
-          path: |
-            armbian-build/armbian-*.tar.gz
-            armbian-build/armbian-*.sha256
-          retention-days: 7
+    - name: Build Armbian (${{ matrix.branch }})
+      working-directory: ./armbian-build
+      run: |
+        # 运行编译命令
+        # -t 表示终端模式，-c config-default.conf 指定配置文件
+        ./compile.sh -t -c userpatches/config-default.conf
 
-  release:
-    needs: build
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Create release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.inputs.board }}-v${{ github.run_number }}
-          name: Armbian ${{ github.event.inputs.board }} Build #${{ github.run_number }}
-          body: |
-            Board: ${{ github.event.inputs.board }}
-            Release: ${{ github.event.inputs.release }}
-            Desktop: ${{ github.event.inputs.desktop }}
-            Date: $(date +%Y-%m-%d)
-            
-            Built with https://github.com/alerice/armbian-build
-          files: |
-            artifacts/armbian-legacy/*.tar.gz
-            artifacts/armbian-legacy/*.sha256
-            artifacts/armbian-vendor/*.tar.gz
-            artifacts/armbian-vendor/*.sha256
+    - name: Create Release and Upload Assets
+      # 此步骤仅在所有矩阵构建都成功后执行一次
+      if: ${{ success() }}
+      uses: softprops/action-gh-release@v1
+      with:
+        # 发布的名称将包含 Git 提交的短哈希
+        name: Release ${GITHUB_REF##*/}
+        # 标签名称与推送的 tag 一致
+        tag_name: ${{ github.ref_name }}
+        # 生成发布的说明，列出本次构建的提交信息
+        body: |
+          Automated release for commit ${{ github.sha }}.
+          
+          Built images for boca-tcn200:
+          - legacy
+          - vendor
+        # 将 output/images 目录下的所有文件作为发布资产
+        files: armbian-build/output/images/**
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
