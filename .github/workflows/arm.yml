@@ -1,0 +1,226 @@
+name: Build Armbian for boca-tcn200
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag version'
+        required: true
+        default: 'v1.0.0'
+        type: string
+
+env:
+  BOARD: boca-tcn200
+  REPO_URL: https://github.com/alerice/armbian-build.git
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: [legacy, vendor]
+    
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          df -h
+
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          swap-size-mb: 1024
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+
+      - name: Checkout armbian-build repository
+        run: |
+          git clone --depth=1 $REPO_URL armbian-build
+          cd armbian-build
+          git log -1 --oneline
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: |
+            armbian-build/cache/ccache
+            armbian-build/cache/sources
+          key: armbian-${{ matrix.branch }}-${{ github.sha }}
+          restore-keys: |
+            armbian-${{ matrix.branch }}-
+            armbian-
+
+      - name: Prepare build environment
+        run: |
+          cd armbian-build
+          # 设置编译参数
+          cat > build.config << EOF
+          BOARD=${BOARD}
+          BRANCH=${{ matrix.branch }}
+          RELEASE=noble
+          BUILD_MINIMAL=no
+          BUILD_DESKTOP=no
+          KERNEL_CONFIGURE=no
+          KERNEL_KEEP_CONFIG=yes
+          COMPRESS_OUTPUTIMAGE=sha,gpg,xz
+          EOF
+          
+          # 显示配置
+          echo "=== Build Configuration ==="
+          cat build.config
+          echo "==========================="
+
+      - name: Build Armbian (${{ matrix.branch }})
+        run: |
+          cd armbian-build
+          
+          # 执行编译
+          ./compile.sh \
+            BOARD=${BOARD} \
+            BRANCH=${{ matrix.branch }} \
+            RELEASE=noble \
+            BUILD_MINIMAL=no \
+            BUILD_DESKTOP=no \
+            KERNEL_CONFIGURE=no \
+            KERNEL_KEEP_CONFIG=yes \
+            COMPRESS_OUTPUTIMAGE=sha,gpg,xz \
+            EXPERT=yes
+
+      - name: List output files
+        run: |
+          echo "=== Output Files (${{ matrix.branch }}) ==="
+          ls -lah armbian-build/output/images/ 2>/dev/null || echo "No images directory"
+          ls -lah armbian-build/output/debs/ 2>/dev/null || echo "No debs directory"
+          find armbian-build/output -type f -name "*.img*" -o -name "*.deb" 2>/dev/null
+
+      - name: Prepare artifacts
+        run: |
+          mkdir -p artifacts/${{ matrix.branch }}
+          
+          # 复制镜像文件
+          if [ -d "armbian-build/output/images" ]; then
+            cp -v armbian-build/output/images/*.img* artifacts/${{ matrix.branch }}/ 2>/dev/null || true
+          fi
+          
+          # 复制deb包（可选）
+          if [ -d "armbian-build/output/debs" ]; then
+            mkdir -p artifacts/${{ matrix.branch }}/debs
+            cp -rv armbian-build/output/debs/*.deb artifacts/${{ matrix.branch }}/debs/ 2>/dev/null || true
+          fi
+          
+          # 复制配置和日志
+          if [ -d "armbian-build/output/config" ]; then
+            cp -rv armbian-build/output/config artifacts/${{ matrix.branch }}/ 2>/dev/null || true
+          fi
+          
+          # 生成构建信息
+          cat > artifacts/${{ matrix.branch }}/build_info.txt << EOF
+          Build Information
+          =================
+          Board: ${BOARD}
+          Branch: ${{ matrix.branch }}
+          Build Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          Commit: ${{ github.sha }}
+          Workflow: ${{ github.workflow }}
+          Run ID: ${{ github.run_id }}
+
+          Files:
+          $(find artifacts/${{ matrix.branch }} -type f -exec ls -lh {} \;)
+          EOF
+          
+          echo "=== Artifact Contents ==="
+          find artifacts/${{ matrix.branch }} -type f
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: armbian-${{ matrix.branch }}
+          path: artifacts/${{ matrix.branch }}/
+          retention-days: 7
+          compression-level: 0
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all_artifacts
+
+      - name: Prepare release files
+        run: |
+          echo "=== Downloaded Artifacts ==="
+          find all_artifacts -type f
+          
+          # 创建发布目录
+          mkdir -p release_files
+          
+          # 移动并重命名文件
+          for branch in legacy vendor; do
+            if [ -d "all_artifacts/armbian-${branch}" ]; then
+              # 复制镜像文件到根目录
+              find all_artifacts/armbian-${branch} -name "*.img.xz" -exec cp -v {} release_files/ \;
+              find all_artifacts/armbian-${branch} -name "*.img.xz.sha" -exec cp -v {} release_files/ \;
+              find all_artifacts/armbian-${branch} -name "*.img.xz.asc" -exec cp -v {} release_files/ \;
+            fi
+          done
+          
+          # 生成总体的发布说明
+          cat > release_files/RELEASE_NOTES.md << EOF
+          # Armbian Build Release
+
+          ## Build Information
+          - **Board**: ${BOARD}
+          - **Branches**: legacy, vendor
+          - **Build Date**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          - **Commit**: ${{ github.sha }}
+
+          ## Included Files
+          \`\`\`
+          $(ls -lh release_files/)
+          \`\`\`
+
+          ## Verification
+          Verify downloaded images using SHA256 checksums:
+          \`\`\`bash
+          sha256sum -c *.sha
+          \`\`\`
+          EOF
+          
+          echo "=== Release Files ==="
+          ls -lah release_files/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag }}
+          name: Armbian ${{ github.event.inputs.release_tag }} - ${BOARD}
+          body_path: release_files/RELEASE_NOTES.md
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: false
+          files: |
+            release_files/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Summary
+        run: |
+          echo "## Release Created! 🎉" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Tag**: ${{ github.event.inputs.release_tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Board**: ${BOARD}" >> $GITHUB_STEP_SUMMARY
+          echo "**Branches**: legacy, vendor" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Released Files:" >> $GITHUB_STEP_SUMMARY
+          ls -lh release_files/ >> $GITHUB_STEP_SUMMARY
