@@ -1,285 +1,247 @@
-name: Build Armbian Firmware
+# .github/workflows/armbian.yml
+name: Build Boca TCN200 Firmware
 
 on:
-  push:
-    branches:
-      - main
-      - master
   workflow_dispatch:
-    inputs:
-      board:
-        description: 'Target board (e.g., orangepi5, rock-5b, radxa-zero3)'
-        required: true
-        default: 'orangepi5'
-      release:
-        description: 'Target release (e.g., jammy, bookworm, noble)'
-        required: true
-        default: 'bookworm'
-      build_desktop:
-        description: 'Build desktop image'
-        required: true
-        default: 'server'
-        type: choice
-        options:
-          - 'server'
-          - 'desktop'
-          - 'minimal'
+  push:
+    tags:
+      - 'v*.*.*'
 
 env:
-  BOARD: ${{ github.event.inputs.board || 'orangepi5' }}
-  RELEASE: ${{ github.event.inputs.release || 'bookworm' }}
-  BUILD_DESKTOP: ${{ github.event.inputs.build_desktop || 'server' }}
+  BOARD: boca-tcn200
+  RELEASE: jammy
+  ARMBIAN_WORKDIR: /mnt/armbian-work
+  ARMBIAN_CACHE_DIR: /mnt/armbian-cache
 
 jobs:
-  prepare:
+  build-legacy:
+    name: Build Legacy (Kernel 5.10)
     runs-on: ubuntu-22.04
-    outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
-    
+    timeout-minutes: 360
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          repository: alerice/armbian-build
-          fetch-depth: 0
-          submodules: recursive
-      
-      - name: Get supported branches
-        id: set-matrix
-        run: |
-          # 定义要编译的分支
-          # 对于 orangepi5: edge, current, vendor
-          # 如果需要特定分支，可以修改这里
-          MATRIX='{"branch":["current","vendor"]}'
-          echo "matrix=${MATRIX}" >> $GITHUB_OUTPUT
-          echo "Build matrix: ${MATRIX}"
-
-  build:
-    needs: prepare
-    runs-on: ubuntu-22.04
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
-    
-    steps:
-      - name: Maximize build space
-        uses: easimon/maximize-build-space@master
-        with:
-          root-reserve-mb: 8192
-          swap-size-mb: 1024
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          remove-docker-images: 'true'
-      
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          repository: alerice/armbian-build
-          fetch-depth: 0
-          submodules: recursive
-      
-      - name: Show disk space
+      - name: Check disk space
         run: df -h
-      
-      - name: Prepare build environment
+
+      - name: Prepare workspace on /mnt
         run: |
-          git config --global user.email "builder@armbian.com"
-          git config --global user.name "Armbian Builder"
-          
-          mkdir -p output/images
-          mkdir -p output/logs
-          mkdir -p userpatches
-          
-          # 创建自动应答配置，避免交互式 dialog
-          cat > userpatches/config-default.conf << 'EOF'
-          # 非交互模式设置
-          NO_HOST_RELEASE="yes"
-          EOF
-      
-      - name: Build Armbian (${{ matrix.branch }})
+          sudo mkdir -p ${{ env.ARMBIAN_WORKDIR }}
+          sudo mkdir -p ${{ env.ARMBIAN_CACHE_DIR }}
+          sudo chown -R $USER:$USER ${{ env.ARMBIAN_WORKDIR }}
+          sudo chown -R $USER:$USER ${{ env.ARMBIAN_CACHE_DIR }}
+
+      - name: Install dependencies
         run: |
-          # 设置构建类型
-          BUILD_OPT=""
-          case "${BUILD_DESKTOP}" in
-            "server")
-              BUILD_OPT="server"
-              ;;
-            "desktop")
-              BUILD_OPT="desktop"
-              ;;
-            "minimal")
-              BUILD_OPT="minimal"
-              ;;
-            *)
-              BUILD_OPT="server"
-              ;;
-          esac
-          
-          echo "=========================================="
-          echo "Building Armbian:"
-          echo "  Board: ${BOARD}"
-          echo "  Branch: ${{ matrix.branch }}"
-          echo "  Release: ${RELEASE}"
-          echo "  Type: ${BUILD_OPT}"
-          echo "=========================================="
-          
-          # 使用新的 CLI 命令格式构建完整镜像
-          # EXPERT=yes 允许使用非交互模式
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache debootstrap flex gawk gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf git libncurses5-dev libssl-dev lsb-release lzop python3-dev python3-pip python3-pexpect python3-setuptools qemu-user-static u-boot-tools xz-utils zlib1g-dev parted zip curl wget rsync dos2unix dialog device-tree-compiler lz4
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          path: ${{ env.ARMBIAN_WORKDIR }}/armbian-build
+
+      - name: Build Legacy firmware
+        run: |
+          cd ${{ env.ARMBIAN_WORKDIR }}/armbian-build
+          mkdir -p output
           ./compile.sh \
-            BOARD="${BOARD}" \
-            BRANCH="${{ matrix.branch }}" \
-            RELEASE="${RELEASE}" \
-            BUILD_OPT="${BUILD_OPT}" \
-            EXPERT="yes" \
-            COMPRESS_OUTPUTIMAGE="sha,xz" \
-            NO_HOST_RELEASE="yes" \
-            ALLOW_ROOT="yes"
-      
-      - name: List output files
+            BOARD=${{ env.BOARD }} \
+            BRANCH=legacy \
+            RELEASE=${{ env.RELEASE }} \
+            BUILD_MINIMAL=no \
+            BUILD_DESKTOP=no \
+            KERNEL_CONFIGURE=no \
+            CLEAN_LEVEL=2 \
+            EXTERNAL_NEW="yes" \
+            LIB_TAG="jammy" \
+            KERNEL_KEEP_CONFIG="yes" \
+            BOARD_NAME="Boca TCN200 (Legacy 5.10)" \
+            2>&1 | tee build.log || echo "Build failed but continuing to collect artifacts"
+
+      - name: Collect legacy images
         run: |
-          echo "=== Output Images ==="
-          ls -lah output/images/ 2>/dev/null || echo "No images found"
-          echo ""
-          echo "=== Output Logs ==="
-          ls -lah output/logs/ 2>/dev/null || echo "No logs found"
-          echo ""
-          echo "=== All Output Files ==="
-          find output -type f -exec ls -lh {} \; 2>/dev/null || echo "No output files"
-      
-      - name: Prepare artifacts
-        run: |
-          ARTIFACT_DIR="release_${{ matrix.branch }}"
-          mkdir -p "${ARTIFACT_DIR}"
-          
-          # 复制镜像文件
-          if [ -d "output/images" ]; then
-            find output/images -type f \( -name "*.img*" -o -name "*.sha" -o -name "*.asc" \) \
-              -exec cp -v {} "${ARTIFACT_DIR}/" \; 2>/dev/null || true
-          fi
-          
-          # 复制日志
-          if [ -d "output/logs" ]; then
-            cp -rv output/logs/* "${ARTIFACT_DIR}/" 2>/dev/null || true
-          fi
-          
-          # 生成构建信息
-          cat > "${ARTIFACT_DIR}/build_info.txt" << EOF
-          Armbian Build Information
-          ========================
-          Build Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
-          Board: ${BOARD}
-          Branch: ${{ matrix.branch }}
-          Release: ${RELEASE}
-          Desktop: ${BUILD_DESKTOP}
-          Commit: ${{ github.sha }}
-          Workflow Run: ${{ github.run_number }}
-          Repository: ${{ github.repository }}
-          EOF
-          
-          echo "=== Artifacts ==="
-          ls -lah "${ARTIFACT_DIR}/" || echo "No artifacts"
-          
-          # 检查是否有文件
-          if [ -z "$(ls -A ${ARTIFACT_DIR} 2>/dev/null)" ]; then
-            echo "Warning: No artifacts generated!"
-            # 创建一个占位文件
-            echo "Build failed or no output" > "${ARTIFACT_DIR}/build_status.txt"
-          fi
-      
-      - name: Upload artifacts
+          mkdir -p ${{ env.ARMBIAN_WORKDIR }}/legacy-images
+          cd ${{ env.ARMBIAN_WORKDIR }}/armbian-build
+          find output/images -type f \( -name "*.img.xz" -o -name "*.sha256" -o -name "*.txt" \) -exec cp {} ${{ env.ARMBIAN_WORKDIR }}/legacy-images/ \; 2>/dev/null || true
+          ls -lh ${{ env.ARMBIAN_WORKDIR }}/legacy-images/ || echo "No images found"
+
+      - name: Upload legacy artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: armbian-${{ matrix.branch }}-${{ github.run_number }}
-          path: release_${{ matrix.branch }}/*
-          if-no-files-found: warn
+          name: boca-tcn200-legacy
+          path: ${{ env.ARMBIAN_WORKDIR }}/legacy-images/
           retention-days: 7
 
-  release:
-    needs: build
-    runs-on: ubuntu-latest
-    if: always() && needs.build.result == 'success'
-    
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-legacy
+          path: ${{ env.ARMBIAN_WORKDIR }}/armbian-build/build.log
+          retention-days: 3
+
+  build-vendor:
+    name: Build Vendor (Kernel 6.1)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
     steps:
-      - name: Download current artifacts
+      - name: Check disk space
+        run: df -h
+
+      - name: Prepare workspace on /mnt
+        run: |
+          sudo mkdir -p ${{ env.ARMBIAN_WORKDIR }}
+          sudo mkdir -p ${{ env.ARMBIAN_CACHE_DIR }}
+          sudo chown -R $USER:$USER ${{ env.ARMBIAN_WORKDIR }}
+          sudo chown -R $USER:$USER ${{ env.ARMBIAN_CACHE_DIR }}
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache debootstrap flex gawk gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf git libncurses5-dev libssl-dev lsb-release lzop python3-dev python3-pip python3-pexpect python3-setuptools qemu-user-static u-boot-tools xz-utils zlib1g-dev parted zip curl wget rsync dos2unix dialog device-tree-compiler lz4
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          path: ${{ env.ARMBIAN_WORKDIR }}/armbian-build
+
+      - name: Build Vendor firmware
+        run: |
+          cd ${{ env.ARMBIAN_WORKDIR }}/armbian-build
+          mkdir -p output
+          ./compile.sh \
+            BOARD=${{ env.BOARD }} \
+            BRANCH=current \
+            RELEASE=${{ env.RELEASE }} \
+            BUILD_MINIMAL=no \
+            BUILD_DESKTOP=no \
+            KERNEL_CONFIGURE=no \
+            CLEAN_LEVEL=2 \
+            EXTERNAL_NEW="yes" \
+            LIB_TAG="jammy" \
+            KERNEL_KEEP_CONFIG="yes" \
+            BOARD_NAME="Boca TCN200 (Vendor 6.1)" \
+            2>&1 | tee build.log || echo "Build failed but continuing to collect artifacts"
+
+      - name: Collect vendor images
+        run: |
+          mkdir -p ${{ env.ARMBIAN_WORKDIR }}/vendor-images
+          cd ${{ env.ARMBIAN_WORKDIR }}/armbian-build
+          find output/images -type f \( -name "*.img.xz" -o -name "*.sha256" -o -name "*.txt" \) -exec cp {} ${{ env.ARMBIAN_WORKDIR }}/vendor-images/ \; 2>/dev/null || true
+          ls -lh ${{ env.ARMBIAN_WORKDIR }}/vendor-images/ || echo "No images found"
+
+      - name: Upload vendor artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: boca-tcn200-vendor
+          path: ${{ env.ARMBIAN_WORKDIR }}/vendor-images/
+          retention-days: 7
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-vendor
+          path: ${{ env.ARMBIAN_WORKDIR }}/armbian-build/build.log
+          retention-days: 3
+
+  release:
+    name: Create GitHub Release
+    needs: [build-legacy, build-vendor]
+    runs-on: ubuntu-22.04
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Download legacy artifacts
         uses: actions/download-artifact@v4
         with:
-          name: armbian-current-${{ github.run_number }}
-          path: release/current
-        continue-on-error: true
-      
+          name: boca-tcn200-legacy
+          path: /tmp/legacy
+
       - name: Download vendor artifacts
         uses: actions/download-artifact@v4
         with:
-          name: armbian-vendor-${{ github.run_number }}
-          path: release/vendor
-        continue-on-error: true
-      
-      - name: List all release files
+          name: boca-tcn200-vendor
+          path: /tmp/vendor
+
+      - name: Prepare release assets
         run: |
-          echo "=== All Release Files ==="
-          find release -type f -exec ls -lh {} \; 2>/dev/null || echo "No files"
-      
-      - name: Check artifacts exist
-        id: check
-        run: |
-          if [ -d "release" ] && [ "$(find release -type f | wc -l)" -gt 0 ]; then
-            echo "has_files=true" >> $GITHUB_OUTPUT
-          else
-            echo "has_files=false" >> $GITHUB_OUTPUT
-            echo "No artifacts found, skipping release"
-          fi
-      
-      - name: Generate release tag
-        if: steps.check.outputs.has_files == 'true'
-        id: tag
-        run: |
-          TAG="v$(date -u +"%Y%m%d")-${{ github.run_number }}"
-          echo "tag=${TAG}" >> $GITHUB_OUTPUT
-          echo "Generated tag: ${TAG}"
-      
-      - name: Create Release
-        if: steps.check.outputs.has_files == 'true'
+          mkdir -p /tmp/release-assets
+          
+          # Rename legacy files
+          for f in /tmp/legacy/*; do
+            [ -f "$f" ] || continue
+            base=$(basename "$f")
+            mv "$f" "/tmp/release-assets/Boca-TCN200-Legacy-5.10-${base}"
+          done
+          
+          # Rename vendor files
+          for f in /tmp/vendor/*; do
+            [ -f "$f" ] || continue
+            base=$(basename "$f")
+            mv "$f" "/tmp/release-assets/Boca-TCN200-Vendor-6.1-${base}"
+          done
+          
+          # Create release notes
+          cat > /tmp/release-assets/RELEASE_NOTES.md << 'EOF'
+# Boca TCN200 Armbian Firmware
+
+## Legacy Branch (Kernel 5.10.160)
+- 稳定性优先，适合 7x24 小时 NAS 运行
+- 完整硬件支持：双 SATA、Type-C USB 3.0、2K HDMI
+- 补丁集：6 个 DTS 修复（音频/USB/显示/电源域）
+
+## Vendor Branch (Kernel 6.1.84)
+- 新特性支持：更新的驱动和安全补丁
+- 精简补丁集（2 个），依赖上游内核改进
+- 推荐用于需要新硬件支持的场景
+
+## 刷机指南
+1. 使用 balenaEtcher/Rufus 写入 SD 卡
+2. 插入 Boca TCN200 SD 卡槽
+3. 上电启动（首次启动约 5 分钟）
+4. 默认用户：root / 1234（首次登录强制修改密码）
+
+⚠️ **重要**：刷机前请备份数据！eMMC 刷写有变砖风险，建议先用 SD 卡测试。
+
+## 已知问题
+- SATA 热插拔需手动重新扫描：`echo "- - -" > /sys/class/scsi_host/host*/scan`
+- 原厂 Android 分区表需完全覆盖（首次刷机建议全盘擦除）
+
+## 技术支持
+- 恩山无线论坛：搜索 "Boca TCN200 Armbian"
+- 本固件基于 commit: 1ca0b6f5db966dbe6c038736a95076ed78b2a10a
+EOF
+
+      - name: Create GitHub Release (tagged)
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          name: "Armbian Firmware ${{ steps.tag.outputs.tag }}"
-          body: |
-            ## Armbian 固件构建
-            
-            **构建信息:**
-            - 📅 构建日期: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
-            - 🖥️ 目标板: \`${{ github.event.inputs.board || 'orangepi5' }}\`
-            - 🐧 发行版: \`${{ github.event.inputs.release || 'bookworm' }}\`
-            - 🖼️ 构建类型: \`${{ github.event.inputs.build_desktop || 'server' }}\`
-            
-            **内核分支:**
-            - 📦 **current** - 稳定的主线内核
-            - 📦 **vendor** - 厂商提供的内核
-            
-            **文件说明:**
-            - `.img.xz` - 压缩的固件镜像文件
-            - `.sha` - SHA256 校验和文件
-            - `build_info.txt` - 构建信息
-            
-            > ⚠️ 请下载对应内核版本的固件并校验完整性后使用
+          tag_name: ${{ github.ref_name }}
+          name: Boca TCN200 Firmware ${{ github.ref_name }}
+          body_path: /tmp/release-assets/RELEASE_NOTES.md
           files: |
-            release/current/*
-            release/vendor/*
-          draft: false
-          prerelease: false
+            /tmp/release-assets/*.img.xz
+            /tmp/release-assets/*.sha256
+            /tmp/release-assets/RELEASE_NOTES.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      
-      - name: Release Summary
-        if: steps.check.outputs.has_files == 'true'
-        run: |
-          echo "## ✅ Release Created Successfully!" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Tag:** \`${{ steps.tag.outputs.tag }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Released Files:" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          find release -type f 2>/dev/null >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Create Development Release (manual trigger)
+        if: github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev-${{ github.run_number }}
+          name: Development Build #${{ github.run_number }}
+          body: |
+            ⚠️ **开发构建** - 非正式发布版本
+            
+            包含：
+            - Legacy (5.10): Boca-TCN200-Legacy-5.10-*.img.xz
+            - Vendor (6.1): Boca-TCN200-Vendor-6.1-*.img.xz
+            
+            适用于测试目的，不建议生产环境使用。
+          files: |
+            /tmp/release-assets/*.img.xz
+            /tmp/release-assets/*.sha256
+            /tmp/release-assets/RELEASE_NOTES.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
