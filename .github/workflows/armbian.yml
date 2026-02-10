@@ -1,4 +1,4 @@
-name: Build Armbian TCN200
+name: Build Armbian
 
 # 在创建 tag 时触发此工作流
 on:
@@ -51,6 +51,13 @@ jobs:
         # -t 表示终端模式，-c config-default.conf 指定配置文件
         ./compile.sh -t -c userpatches/config-default.conf
 
+    # --- 新增步骤：将输出文件复制到一个单独的目录以便上传 ---
+    - name: Copy outputs to a common directory
+      run: |
+        mkdir -p ./release_assets
+        cp -r ./armbian-build/output/images/* ./release_assets/
+        
+    # --- 修改发布步骤：从新的公共目录上传 ---
     - name: Create Release and Upload Assets
       # 此步骤仅在所有矩阵构建都成功后执行一次
       if: ${{ success() }}
@@ -67,7 +74,8 @@ jobs:
           Built images for boca-tcn200:
           - legacy
           - vendor
-        # 将 output/images 目录下的所有文件作为发布资产
-        files: armbian-build/output/images/**
+        # 将之前复制到 release_assets 目录下的所有文件作为发布资产
+        files: |
+          ./release_assets/**
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
