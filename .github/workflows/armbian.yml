@@ -1,11 +1,11 @@
 # .github/workflows/armbian.yml
-name: Armbian Build - Legacy & Vendor
+name: Armbian Build
 
 on:
   workflow_dispatch:
     inputs:
       board:
-        description: 'Target board name (e.g., nas-lite, rock-5b)'
+        description: 'Target board name (e.g., nas-lite)'
         required: true
         default: 'nas-lite'
       release:
@@ -17,17 +17,6 @@ on:
         required: false
         default: 'no'
         type: boolean
-      build_threads:
-        description: 'Number of build threads (0 = auto)'
-        required: false
-        default: '0'
-
-env:
-  DEBIAN_FRONTEND: noninteractive
-  BOARD: ${{ github.event.inputs.board }}
-  RELEASE: ${{ github.event.inputs.release }}
-  BUILD_DESKTOP: ${{ github.event.inputs.desktop == 'true' && 'yes' || 'no' }}
-  BUILD_THREADS: ${{ github.event.inputs.build_threads }}
 
 jobs:
   build:
@@ -38,14 +27,16 @@ jobs:
 
     runs-on: ubuntu-22.04
     env:
+      BOARD: ${{ github.event.inputs.board }}
       BRANCH: ${{ matrix.branch }}
+      RELEASE: ${{ github.event.inputs.release }}
+      BUILD_DESKTOP: ${{ github.event.inputs.desktop == 'true' && 'yes' || 'no' }}
 
     steps:
-      - name: Check resources
+      - name: Check disk space
         run: |
-          df -h / | grep -v Filesystem
-          free -h
-          echo "CPU cores: $(nproc)"
+          df -h / | tail -1
+          free -h | grep Mem
 
       - name: Checkout armbian-build
         uses: actions/checkout@v4
@@ -58,112 +49,65 @@ jobs:
         working-directory: armbian-build
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            bc bison build-essential ccache debootstrap flex gawk \
-            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf git \
-            libc6-dev-armhf-cross libc6-dev-arm64-cross libncurses5-dev \
-            libssl-dev lsb-release lzop python3 python3-dev python3-pip \
-            python3-setuptools qemu-user-static u-boot-tools xz-utils \
-            wget zip unzip rsync parted dosfstools btrfs-progs curl \
-            pigz pv dialog whiptail ca-certificates
+          sudo apt-get install -y --no-install-recommends bc bison build-essential ccache debootstrap flex gawk gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf git libc6-dev-armhf-cross libc6-dev-arm64-cross libncurses5-dev libssl-dev lsb-release lzop python3 python3-dev python3-pip python3-setuptools qemu-user-static u-boot-tools xz-utils wget zip unzip rsync parted dosfstools btrfs-progs curl pigz pv dialog whiptail ca-certificates
 
-      - name: Configure ccache
-        run: ccache --max-size=15G
-
-      - name: Build Armbian (${{ matrix.branch }})
+      - name: Build Armbian
         working-directory: armbian-build
         run: |
-          THREADS="${BUILD_THREADS:-$(nproc)}"
-          echo "Building ${BOARD} with ${BRANCH} kernel on ${RELEASE} (threads: ${THREADS})"
-          
-          ./compile.sh \
-            BOARD="${BOARD}" \
-            BRANCH="${BRANCH}" \
-            RELEASE="${RELEASE}" \
-            BUILD_DESKTOP="${BUILD_DESKTOP}" \
-            BUILD_MINIMAL=no \
-            KERNEL_CONFIGURE=no \
-            CLEAN_LEVEL="make,debs,images" \
-            BUILD_THREADS="${THREADS}" \
-            PROGRESS_LOG_TO_FILE=yes \
-            2>&1 | tee "build-${BRANCH}.log" || {
-              echo "::error::Build failed for ${BRANCH} kernel"
-              tail -n 200 "build-${BRANCH}.log"
-              exit 1
-            }
-          
-          echo "::notice::Build successful for ${BRANCH} kernel"
-          ls -lh output/images/ 2>/dev/null || echo "No images found (expected for some boards)"
+          ./compile.sh BOARD="${BOARD}" BRANCH="${BRANCH}" RELEASE="${RELEASE}" BUILD_DESKTOP="${BUILD_DESKTOP}" BUILD_MINIMAL=no KERNEL_CONFIGURE=no CLEAN_LEVEL="make,debs,images" BUILD_THREADS="$(nproc)" PROGRESS_LOG_TO_FILE=yes 2>&1 | tee build.log || { tail -n 200 build.log; exit 1; }
+          echo "Build completed successfully"
 
-      - name: Package output artifacts
+      - name: Package artifacts
         working-directory: armbian-build
         run: |
-          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          TIMESTAMP=$(date +%Y%m%d)
           OUTPUT_DIR="armbian-${BOARD}-${BRANCH}-${RELEASE}-${TIMESTAMP}"
           mkdir -p "${OUTPUT_DIR}"
-          
-          # Copy all output content preserving structure
-          cp -r output/. "${OUTPUT_DIR}/" 2>/dev/null || mkdir -p "${OUTPUT_DIR}/empty"
-          
-          # Add build metadata
-          cat > "${OUTPUT_DIR}/BUILD_INFO.txt" <<EOF
+          cp -r output/. "${OUTPUT_DIR}/" 2>/dev/null || true
+          cat > "${OUTPUT_DIR}/BUILD_INFO.txt" << EOF
 Board: ${BOARD}
 Kernel Branch: ${BRANCH}
 Release: ${RELEASE}
 Desktop: ${BUILD_DESKTOP}
 Build Date: $(date)
-GitHub Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+Workflow Run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
 EOF
-          
-          # Save build log
-          cp "build-${BRANCH}.log" "${OUTPUT_DIR}/" 2>/dev/null || touch "${OUTPUT_DIR}/build.log.empty"
-          
-          # Create archive
+          cp build.log "${OUTPUT_DIR}/" 2>/dev/null || true
           tar -czf "${OUTPUT_DIR}.tar.gz" "${OUTPUT_DIR}"
           sha256sum "${OUTPUT_DIR}.tar.gz" > "${OUTPUT_DIR}.sha256"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: armbian-${{ matrix.branch }}-output
+          name: armbian-${{ matrix.branch }}
           path: |
-            armbian-build/armbian-*-*.tar.gz
-            armbian-build/armbian-*-*.sha256
+            armbian-build/armbian-*.tar.gz
+            armbian-build/armbian-*.sha256
           retention-days: 7
 
   release:
     needs: build
     runs-on: ubuntu-22.04
-    if: github.event_name == 'workflow_dispatch'
-
     steps:
-      - name: Download build artifacts
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-          pattern: armbian-*-output
-          merge-multiple: true
 
-      - name: Create GitHub Release
+      - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.board }}-v${{ github.run_number }}
           name: Armbian ${{ github.event.inputs.board }} Build #${{ github.run_number }}
           body: |
-            ## Build Summary
-            - **Board**: `${{ github.event.inputs.board }}`
-            - **Release**: `${{ github.event.inputs.release }}`
-            - **Desktop**: `${{ github.event.inputs.desktop }}`
-            - **Date**: `$(date +%Y-%m-%d)`
+            Board: ${{ github.event.inputs.board }}
+            Release: ${{ github.event.inputs.release }}
+            Desktop: ${{ github.event.inputs.desktop }}
+            Date: $(date +%Y-%m-%d)
             
-            ### Artifacts Included
-            - Full system images (`.img.xz`)
-            - Kernel packages (`.deb`)
-            - Build logs and debug info
-            
-            *Built with [alerice/armbian-build](https://github.com/alerice/armbian-build)*
+            Built with https://github.com/alerice/armbian-build
           files: |
-            artifacts/armbian-legacy-*.tar.gz
-            artifacts/armbian-legacy-*.sha256
-            artifacts/armbian-vendor-*.tar.gz
-            artifacts/armbian-vendor-*.sha256
+            artifacts/armbian-legacy/*.tar.gz
+            artifacts/armbian-legacy/*.sha256
+            artifacts/armbian-vendor/*.tar.gz
+            artifacts/armbian-vendor/*.sha256
